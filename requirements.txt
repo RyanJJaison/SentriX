@@ -1,0 +1,9 @@
+torch==2.14.0
+torch_geometric==2.8.0.post1
+networkx==3.6.1
+# nx.pagerank dispatches to its SciPy implementation, so scipy is required
+# even though this project never imports it directly.
+scipy==1.18.1
+pandas==3.0.5
+pyarrow==25.0.1
+kaggle==2.2.4
