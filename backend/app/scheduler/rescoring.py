@@ -14,7 +14,7 @@ import logging
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.core.config import settings
-from app.services import audit_service, risk_service
+from app.services import audit_service, risk_service, traffic_correlation
 
 logger = logging.getLogger("rescoring")
 
@@ -29,6 +29,14 @@ def _get_recently_changed_addresses() -> list[str]:
 
 
 def run_rescoring_cycle() -> None:
+    # Refresh the traffic-anomaly snapshot first so the fusion step below sees
+    # current features. An empty traffic window is a no-op, never an error.
+    try:
+        traffic_summary = traffic_correlation.refresh()
+        audit_service.log_system_event("traffic_refresh", str(traffic_summary))
+    except Exception:  # noqa: BLE001 - traffic must not break rescoring
+        logger.exception("Traffic refresh failed; continuing rescoring")
+
     changed = _get_recently_changed_addresses()
     count = risk_service.rescore_neighborhood(changed)
     logger.info("Rescoring cycle complete: %d addresses updated", count)

@@ -1,18 +1,30 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 
-from app.api.routers import address, alerts, audit, auth, graph
+from app.api.routers import address, ai, alerts, audit, auth, graph, traffic
+from app.capture.manager import capture_manager
 from app.core.security import decode_access_token
 from app.scheduler import rescoring
 from app.services import audit_service
 
+logger = logging.getLogger("sentrix")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    try:
+        capture_manager.start()
+    except Exception:  # noqa: BLE001 - capture is best-effort, never blocks startup
+        logger.exception("traffic capture failed to start; continuing without it")
     rescoring.start()
     yield
     rescoring.shutdown()
+    try:
+        capture_manager.stop()
+    except Exception:  # noqa: BLE001
+        logger.exception("traffic capture failed to stop cleanly")
 
 
 app = FastAPI(
@@ -55,4 +67,6 @@ app.include_router(auth.router)
 app.include_router(address.router)
 app.include_router(alerts.router)
 app.include_router(graph.router)
+app.include_router(traffic.router)
+app.include_router(ai.router)
 app.include_router(audit.router)
