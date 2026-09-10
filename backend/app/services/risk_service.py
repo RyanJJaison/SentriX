@@ -9,6 +9,7 @@ To integrate: replace the body of each method with a call into the real
 Neo4j-backed graph store (see app.db.neo4j_client) and the fusion engine's
 output, keeping the same signatures and return shapes.
 """
+import csv
 import hashlib
 import json
 import logging
@@ -92,6 +93,75 @@ def _load_graph_scores() -> dict[str, tuple[float, float]]:
         f" ({skipped} records skipped)" if skipped else "",
     )
     return scores
+
+
+# Elliptic edge list (raw Kaggle release), used for real subgraph structure.
+# Overridable so tests and deployments can point at a different file.
+_DEFAULT_EDGELIST_PATH = Path(__file__).resolve().parents[3] / "data" / "raw" / "elliptic_txs_edgelist.csv"
+
+# Ceiling on nodes returned by one subgraph query, center included. Elliptic has
+# addresses with hundreds of direct neighbours; returning all of them makes an
+# unreadable blob in the UI and a large payload for the AI tool. When the real
+# neighbourhood exceeds this, the highest-risk neighbours are kept.
+_SUBGRAPH_NODE_CAP = 40
+
+
+def _edgelist_path() -> Path:
+    override = os.environ.get("SENTRIX_EDGELIST_PATH")
+    return Path(override) if override else _DEFAULT_EDGELIST_PATH
+
+
+@lru_cache(maxsize=1)
+def _load_adjacency() -> dict[str, frozenset[str]]:
+    """Load the Elliptic edge list into {txId: frozenset(connected txIds)}.
+
+    Built **undirected**: each edge is recorded in both directions. The
+    underlying data is directed (txId1 -> txId2), but a subgraph view is asking
+    "what is this transaction connected to", and hiding inbound edges would show
+    an analyst a misleadingly sparse neighbourhood.
+
+    Cached for the process lifetime like `_load_graph_scores`: ~234k edges
+    parsed once into an adjacency map rather than re-read per request.
+
+    A missing file is not an error -- callers fall back to a center-only
+    response, which keeps the API working without the raw dataset.
+    """
+    path = _edgelist_path()
+    if not path.is_file():
+        log.warning(
+            "Edge list not found at %s; subgraph queries will return the center "
+            "node only. Fetch it with `python scripts/fetch_kaggle.py`.",
+            path,
+        )
+        return {}
+
+    neighbours: dict[str, set[str]] = {}
+    skipped = 0
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        # Column names verified against the file itself, not assumed.
+        if reader.fieldnames != ["txId1", "txId2"]:
+            log.warning(
+                "Unexpected edge list columns %s (expected ['txId1', 'txId2']); "
+                "subgraph queries will return the center node only.",
+                reader.fieldnames,
+            )
+            return {}
+        for row in reader:
+            source, target = row.get("txId1"), row.get("txId2")
+            if not source or not target:
+                skipped += 1
+                continue
+            neighbours.setdefault(source, set()).add(target)
+            neighbours.setdefault(target, set()).add(source)
+
+    log.info(
+        "Loaded adjacency for %d addresses from %s%s",
+        len(neighbours),
+        path,
+        f" ({skipped} rows skipped)" if skipped else "",
+    )
+    return {node: frozenset(peers) for node, peers in neighbours.items()}
 
 
 def _compute_address_risk(address: str) -> AddressRisk:
@@ -235,24 +305,83 @@ def list_ranked_addresses(threshold: float = 0.0, limit: int = 50) -> list[Ranke
     ]
 
 
-def get_subgraph(address: str, depth: int = 1) -> SubgraphResponse:
-    neighbor_count = 3 + int(_pseudo_random(address, "neighbors") * 4)
-    nodes = [GraphNode(id=address, label=address, risk_score=get_address_risk(address).risk_score)]
-    edges: list[GraphEdge] = []
+def _edge_id(source: str, target: str) -> str:
+    """Stable synthetic id for one edge.
 
-    for i in range(neighbor_count):
-        neighbor = f"{address}-N{i}"
-        nodes.append(
-            GraphNode(id=neighbor, label=neighbor, risk_score=get_address_risk(neighbor).risk_score)
-        )
-        edges.append(
-            GraphEdge(
-                source=address,
-                target=neighbor,
-                tx_id=hashlib.sha1(f"{address}{neighbor}".encode()).hexdigest()[:16],
-                amount=round(_pseudo_random(address, f"amount{i}") * 5, 6),
-            )
-        )
+    Not a blockchain transaction hash, and not pretending to be one. Elliptic's
+    public release identifies transactions by anonymised synthetic ids rather
+    than real hashes -- that is a property of the dataset, not a gap to fill --
+    so no real hash exists to put here for an *edge* either. This is a stable
+    key derived from the endpoint pair, so the same edge always carries the same
+    id across requests (useful for React keys and diffing). Order-independent,
+    because the adjacency map is undirected and the same edge can be traversed
+    from either side.
+    """
+    low, high = sorted((source, target))
+    return hashlib.sha1(f"{low}->{high}".encode()).hexdigest()[:16]
+
+
+def get_subgraph(address: str, depth: int = 1) -> SubgraphResponse:
+    """Real Elliptic neighbourhood around `address`, BFS to `depth` hops.
+
+    Structure comes from the raw edge list via `_load_adjacency`; per-node risk
+    comes from `get_address_risk`, so both are real rather than derived from the
+    requested id.
+
+    An address with no edges in the dataset returns just itself with no edges.
+    Elliptic genuinely contains such nodes, and an empty neighbourhood is the
+    honest answer -- neighbours are never fabricated to make the response look
+    populated.
+
+    When the real neighbourhood is larger than `_SUBGRAPH_NODE_CAP`, the
+    highest-risk nodes are kept, so truncation drops the least interesting
+    nodes rather than an arbitrary slice.
+    """
+    adjacency = _load_adjacency()
+    center_score = get_address_risk(address).risk_score
+
+    # BFS outward, recording the hop at which each node is first reached.
+    hops: dict[str, int] = {address: 0}
+    frontier = [address]
+    for hop in range(1, depth + 1):
+        next_frontier: list[str] = []
+        for node in frontier:
+            for peer in adjacency.get(node, frozenset()):
+                if peer not in hops:
+                    hops[peer] = hop
+                    next_frontier.append(peer)
+        if not next_frontier:
+            break
+        frontier = next_frontier
+
+    discovered = [node for node in hops if node != address]
+
+    # Cap by risk, not by traversal order: score every discovered node, keep the
+    # riskiest. Nearer hops win ties so a 1-hop neighbour is preferred over an
+    # equally-risky 2-hop one.
+    scores = {node: get_address_risk(node).risk_score for node in discovered}
+    if len(discovered) > _SUBGRAPH_NODE_CAP - 1:
+        discovered.sort(key=lambda node: (-scores[node], hops[node]))
+        discovered = discovered[: _SUBGRAPH_NODE_CAP - 1]
+
+    kept = {address, *discovered}
+    nodes = [GraphNode(id=address, label=address, risk_score=center_score)]
+    nodes.extend(
+        GraphNode(id=node, label=node, risk_score=scores[node]) for node in discovered
+    )
+
+    # Emit each edge once, only where both endpoints survived the cap.
+    seen: set[tuple[str, str]] = set()
+    edges: list[GraphEdge] = []
+    for node in kept:
+        for peer in adjacency.get(node, frozenset()):
+            if peer not in kept:
+                continue
+            pair = (node, peer) if node < peer else (peer, node)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            edges.append(GraphEdge(source=pair[0], target=pair[1], tx_id=_edge_id(*pair)))
 
     return SubgraphResponse(center=address, depth=depth, nodes=nodes, edges=edges)
 

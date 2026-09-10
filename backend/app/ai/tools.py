@@ -127,7 +127,8 @@ def _get_address_graph(args, user):  # noqa: ANN001
             for n in sub.nodes
         ],
         "edges": [
-            {"source": e.source, "target": e.target, "amount": e.amount, "tx_id": e.tx_id}
+            # No amount: Elliptic ships no transaction values (see GraphEdge).
+            {"source": e.source, "target": e.target, "tx_id": e.tx_id}
             for e in sub.edges
         ],
     }

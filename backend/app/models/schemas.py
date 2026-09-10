@@ -56,10 +56,16 @@ class GraphNode(BaseModel):
 
 
 class GraphEdge(BaseModel):
+    """One edge of a transaction subgraph.
+
+    No `amount`: Elliptic's public release is anonymised at the value level and
+    ships no BTC transaction amounts, so there is no real figure to report. The
+    field was removed rather than kept as a fabricated or always-null value.
+    """
+
     source: str
     target: str
     tx_id: str
-    amount: float
 
 
 class SubgraphResponse(BaseModel):
