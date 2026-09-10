@@ -194,6 +194,23 @@ def _ranked_risks(threshold: float, limit: int) -> list[AddressRisk]:
     return risks[:limit]
 
 
+def top_ranked_addresses(limit: int = 50) -> list[str]:
+    """The addresses the dashboard currently ranks highest, by *fused* score.
+
+    Exposed for the rescoring scheduler so each cycle refreshes exactly what
+    users are looking at. Ranking by fused score matters: `_candidate_addresses`
+    orders by the exported GNN term alone, and once the live traffic component
+    starts moving, the two orderings diverge -- an address can sit in the UI's
+    top 25 while falling outside a GNN-ranked top 50, which would leave it
+    frozen, the very bug this feeds.
+
+    Reads through `_ranked_risks`, so cached entries are returned as-is (cheap)
+    and only genuinely new addresses are fused here. The caller then overwrites
+    every returned address via `rescore_neighborhood`.
+    """
+    return [risk.address for risk in _ranked_risks(threshold=0.0, limit=limit)]
+
+
 def risk_tier(score: float) -> str:
     """Bucket a fused score into the dashboard's three display tiers."""
     if score >= 0.8:

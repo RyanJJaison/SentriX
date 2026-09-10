@@ -21,11 +21,36 @@ logger = logging.getLogger("rescoring")
 scheduler = BackgroundScheduler()
 
 
+# How many of the top-ranked addresses to refresh per cycle. The dashboard
+# displays a top slice (25 rows, 12 alerts), so refreshing the top 50 covers
+# everything on screen with headroom for re-ordering, without re-fusing all 500
+# pool candidates every five minutes.
+RESCORE_POOL = 50
+
+# Retained so the demo addresses keep a fresh timestamp too. They are not in the
+# exported graph, so they would otherwise fall out of the rescoring set entirely
+# now that the pool is real.
+_DEMO_ADDRESSES = [f"1MockAddr{i:04d}" for i in range(5)]
+
+
 def _get_recently_changed_addresses() -> list[str]:
-    # Placeholder for "new transactions ingested since the last cycle"
-    # (Technical Architecture §3.7). Replace with a query against the
-    # ingestion/storage layer for addresses touched since the last run.
-    return [f"1MockAddr{i:04d}" for i in range(5)]
+    """Addresses to rescore this cycle.
+
+    Still a stand-in for "new transactions ingested since the last cycle"
+    (Technical Architecture §3.7) -- there is no ingestion layer to query yet.
+    But it now returns the top-ranked real addresses rather than a fixed list of
+    synthetic strings.
+
+    That distinction is the whole point of the loop. `risk_service`'s cache is
+    write-once on read (`get_address_risk` only computes on a miss), so an
+    address is frozen at its first-seen score until something explicitly
+    overwrites it. `rescore_neighborhood` is that something, and it can only
+    refresh addresses named here. Previously that was five `1MockAddr` strings
+    absent from the exported graph, so every address the dashboard actually
+    shows kept its first-computed traffic component indefinitely -- for hours,
+    while live capture updated every cycle and was applied to nothing.
+    """
+    return risk_service.top_ranked_addresses(limit=RESCORE_POOL) + _DEMO_ADDRESSES
 
 
 def run_rescoring_cycle() -> None:
@@ -40,8 +65,11 @@ def run_rescoring_cycle() -> None:
     changed = _get_recently_changed_addresses()
     count = risk_service.rescore_neighborhood(changed)
     logger.info("Rescoring cycle complete: %d addresses updated", count)
+    # Log a sample rather than all ~55 ids: enough to verify the loop is hitting
+    # real ranked addresses, without a 1 KB audit line every five minutes.
+    sample = ", ".join(changed[:5])
     audit_service.log_system_event(
-        "rescoring_cycle", f"Rescored {count} addresses: {changed}"
+        "rescoring_cycle", f"Rescored {count} addresses (top: {sample})"
     )
 
 
