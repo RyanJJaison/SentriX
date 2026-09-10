@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import "../platform.css";
 import { HudFrame, ScrambleText, SoundToggle, playUiSound } from "@/components/motion";
+import { ApiError, NetworkError, UnauthorizedError, clearToken, getAddressRisk, listAlerts, listRankedAddresses, type AddressRisk, type Alert as ApiAlert, type RankedAddress } from "@/lib/api";
 import {
   Activity,
   AlertTriangle,
@@ -18,6 +19,7 @@ import {
   GitBranch,
   Globe2,
   Layers,
+  Loader2,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -39,7 +41,13 @@ import {
   Sun,
 } from "lucide-react";
 
-type UserProfile = { name: string; email: string; role: string; initials: string };
+// `agency` is optional and comes from the backend's /auth/me (written into
+// localStorage by Login.tsx). It must stay on this type: the effect below
+// re-serialises `profile` over the stored value on every change, so a field
+// missing here is silently stripped from storage. It deliberately does not
+// share the `email` slot -- that value is bound to the Settings modal's EMAIL
+// input, whose save handler would then persist the agency as an email address.
+type UserProfile = { name: string; email: string; role: string; initials: string; agency?: string };
 
 const defaultProfile: UserProfile = { name: "User", email: "user@sentrix.local", role: "Lead investigator", initials: "US" };
 
@@ -55,7 +63,10 @@ function readAuthenticatedProfile(): UserProfile {
     const user = hostUser || storedUser;
     if (!user) return defaultProfile;
     const name = user.name || defaultProfile.name;
-    return { name, email: user.email || defaultProfile.email, role: user.role || defaultProfile.role, initials: user.initials || getInitials(name) };
+    // `agency` is carried through rather than defaulted: it has no sensible
+    // placeholder, and dropping it here would strip it from storage via the
+    // serialising effect below.
+    return { name, email: user.email || defaultProfile.email, role: user.role || defaultProfile.role, initials: user.initials || getInitials(name), ...(user.agency ? { agency: user.agency } : {}) };
   } catch { return defaultProfile; }
 }
 
@@ -79,7 +90,7 @@ function LogoutModal({ onCancel, onConfirm }: { onCancel: () => void; onConfirm:
 function PreferencesModal({ profile, setProfile, theme, setTheme, notifications, setNotifications, onClose }: { profile: UserProfile; setProfile: (profile: UserProfile) => void; theme: "midnight" | "dusk"; setTheme: (theme: "midnight" | "dusk") => void; notifications: boolean; setNotifications: (enabled: boolean) => void; onClose: () => void }) {
   const [name, setName] = useState(profile.name);
   const [email, setEmail] = useState(profile.email);
-  return <div className="preferences-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="preferences-modal" role="dialog" aria-modal="true" aria-labelledby="preferences-title"><div className="preferences-header"><div><span className="eyebrow"><span className="eyebrow-line" /> ACCOUNT CONTROL</span><h2 id="preferences-title">Settings</h2></div><button className="icon-button" onClick={onClose} aria-label="Close settings"><X size={17} /></button></div><label>DISPLAY NAME<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>EMAIL<input value={email} onChange={(event) => setEmail(event.target.value)} /></label><div className="preference-row"><div><strong>Theme atmosphere</strong><small>Adjust the analyst console contrast.</small></div><div className="segmented-control"><button className={theme === "midnight" ? "selected" : ""} onClick={() => setTheme("midnight")}>Midnight</button><button className={theme === "dusk" ? "selected" : ""} onClick={() => setTheme("dusk")}>Dusk</button></div></div><div className="preference-row"><div><strong>Live notifications</strong><small>Receive new signal and rescoring updates.</small></div><button className={`toggle ${notifications ? "on" : ""}`} onClick={() => setNotifications(!notifications)} aria-label="Toggle live notifications"><span /></button></div><div className="preferences-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={() => { setProfile({ name: name || "User", email: email || "user@sentrix.local", role: profile.role, initials: getInitials(name || "User") }); onClose(); }}>Save changes <Check size={14} /></button></div></section></div>;
+  return <div className="preferences-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="preferences-modal" role="dialog" aria-modal="true" aria-labelledby="preferences-title"><div className="preferences-header"><div><span className="eyebrow"><span className="eyebrow-line" /> ACCOUNT CONTROL</span><h2 id="preferences-title">Settings</h2></div><button className="icon-button" onClick={onClose} aria-label="Close settings"><X size={17} /></button></div><label>DISPLAY NAME<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>EMAIL<input value={email} onChange={(event) => setEmail(event.target.value)} /></label><div className="preference-row"><div><strong>Theme atmosphere</strong><small>Adjust the analyst console contrast.</small></div><div className="segmented-control"><button className={theme === "midnight" ? "selected" : ""} onClick={() => setTheme("midnight")}>Midnight</button><button className={theme === "dusk" ? "selected" : ""} onClick={() => setTheme("dusk")}>Dusk</button></div></div><div className="preference-row"><div><strong>Live notifications</strong><small>Receive new signal and rescoring updates.</small></div><button className={`toggle ${notifications ? "on" : ""}`} onClick={() => setNotifications(!notifications)} aria-label="Toggle live notifications"><span /></button></div><div className="preferences-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={() => { setProfile({ ...profile, name: name || "User", email: email || "user@sentrix.local", role: profile.role, initials: getInitials(name || "User") }); onClose(); }}>Save changes <Check size={14} /></button></div></section></div>;
 }
 
 type Alert = {
@@ -92,30 +103,17 @@ type Alert = {
   color: "red" | "amber" | "violet";
 };
 
+// Mirrors what the API can actually supply for a ranked address.
+// `cluster`, 24h delta, volume and last-seen were dropped rather than kept as
+// invented values: nothing in the pipeline or the traffic engine sources them,
+// so their columns are gone from the table instead of showing plausible fakes.
 type AddressRow = {
   address: string;
-  cluster: string;
   score: number;
-  delta: string;
-  volume: string;
-  seen: string;
   status: "Critical" | "Review" | "Monitor";
 };
 
-const alerts: Alert[] = [
-  { id: "a1", address: "bc1q…8f2", kind: "HIGH RISK", detail: "PPR proximity + unusual relay", score: 0.87, ago: "2m ago", color: "red" },
-  { id: "a2", address: "3J98…2Xh", kind: "NEW CLUSTER", detail: "14 addresses connected", score: 0.74, ago: "7m ago", color: "amber" },
-  { id: "a3", address: "bc1p…k4m", kind: "TRAFFIC ANOMALY", detail: "Relay timing deviation", score: 0.69, ago: "12m ago", color: "violet" },
-  { id: "a4", address: "1Ffmb…qT7", kind: "SCORE UPDATE", detail: "GNN inference complete", score: 0.53, ago: "18m ago", color: "amber" },
-];
 
-const addresses: AddressRow[] = [
-  { address: "bc1q8r3v…8f2", cluster: "C-1048", score: 0.87, delta: "+0.12", volume: "18.42 BTC", seen: "2 min", status: "Critical" },
-  { address: "3J98t1Wp…2Xh", cluster: "C-0981", score: 0.74, delta: "+0.08", volume: "6.81 BTC", seen: "7 min", status: "Review" },
-  { address: "bc1p5x0y…k4m", cluster: "C-1120", score: 0.69, delta: "+0.03", volume: "3.22 BTC", seen: "12 min", status: "Review" },
-  { address: "1FfmbHfn…qT7", cluster: "C-0874", score: 0.53, delta: "−0.04", volume: "9.16 BTC", seen: "18 min", status: "Monitor" },
-  { address: "bc1q0v4d…w9c", cluster: "C-0994", score: 0.41, delta: "+0.01", volume: "1.78 BTC", seen: "24 min", status: "Monitor" },
-];
 
 const navItems = [
   { label: "Overview", icon: LayoutDashboard },
@@ -123,6 +121,38 @@ const navItems = [
   { label: "Transaction graph", icon: Network },
   { label: "Address explorer", icon: Search },
 ];
+
+const ALERT_THRESHOLD = 0.8;
+const ALERT_LIMIT = 12;
+const ADDRESS_LIMIT = 25;
+
+/** "2m ago" / "3h ago" from an ISO timestamp. */
+function timeAgo(iso: string): string {
+  const seconds = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+  return `${Math.round(seconds / 86400)}d ago`;
+}
+
+/**
+ * Adapt one API alert to the local feed shape.
+ *
+ * `kind` and `color` are derived from the score band rather than invented per
+ * row, and `detail` reuses the server's own `reason` text, so nothing here
+ * fabricates a signal the backend did not report.
+ */
+/** Adapt one ranked API address to the table's row shape. */
+function toAddressRow(row: RankedAddress): AddressRow {
+  const status: AddressRow["status"] = row.risk_tier === "Critical" ? "Critical" : row.risk_tier === "Review" ? "Review" : "Monitor";
+  return { address: row.address, score: row.risk_score, status };
+}
+
+function toFeedAlert(row: ApiAlert): Alert {
+  const color: Alert["color"] = row.risk_score >= 0.9 ? "red" : row.risk_score >= 0.85 ? "amber" : "violet";
+  const kind = row.risk_score >= 0.9 ? "HIGH RISK" : row.risk_score >= 0.85 ? "ELEVATED" : "REVIEW";
+  return { id: row.id, address: row.address, kind, detail: row.reason, score: row.risk_score, ago: timeAgo(row.flagged_at), color };
+}
 
 function RiskScore({ value, size = "md" }: { value: number; size?: "sm" | "md" | "lg" }) {
   const color = value >= 0.8 ? "critical" : value >= 0.6 ? "review" : "monitor";
@@ -214,7 +244,71 @@ export default function Home() {
   const [activeNav, setActiveNav] = useState("Overview");
   const [query, setQuery] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
-  const [selectedAddress, setSelectedAddress] = useState(addresses[0]);
+  // Live risk-ranked addresses from GET /address/ranked. Shares the backend's
+  // candidate pool and fused scores with /alerts, so the table and the signal
+  // feed cannot disagree about which addresses rank highest.
+  const [addressRows, setAddressRows] = useState<AddressRow[]>([]);
+  const [addressesLoading, setAddressesLoading] = useState(true);
+  const [addressesError, setAddressesError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setAddressesLoading(true);
+    setAddressesError("");
+    listRankedAddresses(0, ADDRESS_LIMIT)
+      .then((rows) => {
+        if (cancelled) return;
+        setAddressRows(rows.map(toAddressRow));
+        setAddressesLoading(false);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setAddressesLoading(false);
+        if (error instanceof UnauthorizedError) { clearToken(); window.location.href = "/login"; return; }
+        if (error instanceof NetworkError) setAddressesError("Can't reach the SentriX API.");
+        else if (error instanceof ApiError) setAddressesError(`Addresses unavailable (HTTP ${error.status}).`);
+        else setAddressesError("Addresses unavailable.");
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Live alerts from GET /alerts. Mapped onto the existing local `Alert` type
+  // so the rendering below is unchanged: the backend sends
+  // {id, address, risk_score, reason, flagged_at} and this fills in the
+  // presentational fields (kind/detail/color/ago) that have no API equivalent.
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [alertsLoading, setAlertsLoading] = useState(true);
+  const [alertsError, setAlertsError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setAlertsLoading(true);
+    setAlertsError("");
+    listAlerts(ALERT_THRESHOLD, ALERT_LIMIT)
+      .then((rows) => {
+        if (cancelled) return;
+        setAlerts(rows.map(toFeedAlert));
+        setAlertsLoading(false);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setAlertsLoading(false);
+        // NetworkError extends ApiError, so it is tested first; UnauthorizedError
+        // means the token expired mid-session, which is the route guard's case.
+        if (error instanceof UnauthorizedError) {
+          clearToken();
+          window.location.href = "/login";
+          return;
+        }
+        if (error instanceof NetworkError) setAlertsError("Can't reach the SentriX API.");
+        else if (error instanceof ApiError) setAlertsError(`Alerts unavailable (HTTP ${error.status}).`);
+        else setAlertsError("Alerts unavailable.");
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Null until the ranked fetch lands -- there is no mock row to seed from.
+  const [selectedAddress, setSelectedAddress] = useState<AddressRow | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [querySent, setQuerySent] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
@@ -234,9 +328,37 @@ export default function Home() {
 
   const filteredAddresses = useMemo(() => {
     const normalized = query.toLowerCase().trim();
-    if (!normalized) return addresses;
-    return addresses.filter((row) => [row.address, row.cluster, row.status].some((field) => field.toLowerCase().includes(normalized)));
-  }, [query]);
+    if (!normalized) return addressRows;
+    return addressRows.filter((row) => [row.address, row.status].some((field) => field.toLowerCase().includes(normalized)));
+  }, [query, addressRows]);
+
+  // Real per-factor breakdown for whichever address is selected. The ranked
+  // list carries only the fused score, so the contributing factors come from
+  // GET /address/{id}/risk rather than being hardcoded.
+  const [detail, setDetail] = useState<AddressRisk | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+
+  useEffect(() => {
+    if (!selectedAddress) { setDetail(null); return; }
+    let cancelled = false;
+    setDetailLoading(true);
+    getAddressRisk(selectedAddress.address)
+      .then((row) => { if (!cancelled) { setDetail(row); setDetailLoading(false); } })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setDetail(null);
+        setDetailLoading(false);
+        if (error instanceof UnauthorizedError) { clearToken(); window.location.href = "/login"; }
+      });
+    return () => { cancelled = true; };
+  }, [selectedAddress]);
+
+  // Seed the selection from the first real row once the fetch lands, and drop a
+  // stale selection if a refresh no longer contains it.
+  useEffect(() => {
+    if (addressRows.length === 0) { setSelectedAddress(null); return; }
+    setSelectedAddress((current) => (current && addressRows.some((row) => row.address === current.address) ? current : addressRows[0]));
+  }, [addressRows]);
 
   const refresh = () => {
     setIsRefreshing(true);
@@ -306,12 +428,15 @@ export default function Home() {
               <div className="table-tools"><div className="search-field"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search address or cluster" /><kbd>/</kbd></div><button className="filter-icon-button" aria-label="Filter address list"><Filter size={14} /></button></div>
               <div className="risk-table-wrap">
                 <table className="risk-table">
-                  <thead><tr><th>ADDRESS</th><th>CLUSTER</th><th>RISK SCORE <ChevronDown size={12} /></th><th>24H Δ</th><th>VOLUME</th><th>LAST SEEN</th><th /></tr></thead>
+                  <thead><tr><th>ADDRESS</th><th>TIER</th><th>RISK SCORE <ChevronDown size={12} /></th><th /></tr></thead>
                   <tbody>
-                    {filteredAddresses.map((row) => (
+                    {addressesLoading && <tr><td colSpan={4} className="table-state"><Loader2 className="alert-spinner" size={14} /> Loading ranked addresses…</td></tr>}
+                    {!addressesLoading && addressesError !== "" && <tr><td colSpan={4} className="table-state error"><AlertTriangle size={14} /> {addressesError}</td></tr>}
+                    {!addressesLoading && addressesError === "" && filteredAddresses.length === 0 && <tr><td colSpan={4} className="table-state">{query.trim() ? `No ranked address matches "${query.trim()}".` : "No ranked addresses available."}</td></tr>}
+                    {!addressesLoading && addressesError === "" && filteredAddresses.map((row) => (
                       <tr
                         key={row.address}
-                        className={selectedAddress.address === row.address ? "selected" : ""}
+                        className={selectedAddress?.address === row.address ? "selected" : ""}
                         onClick={() => { playUiSound("click"); setSelectedAddress(row); }}
                       >
                         <td>
@@ -323,30 +448,34 @@ export default function Home() {
                             </div>
                           </div>
                         </td>
-                        <td><span className="cluster-tag">{row.cluster}</span></td>
+                        <td><span className={`tier-tag ${row.status.toLowerCase()}`}>{row.status}</span></td>
                         <td><RiskScore value={row.score} /></td>
-                        <td><span className={row.delta.startsWith("+") ? "delta-up" : "delta-down"}>{row.delta}</span></td>
-                        <td className="muted-cell">{row.volume}</td>
-                        <td className="muted-cell">{row.seen}</td>
                         <td><button className="row-more" aria-label={`More options for ${row.address}`} onClick={(event) => event.stopPropagation()}><MoreHorizontal size={15} /></button></td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-              <div className="panel-footer"><span>Showing {filteredAddresses.length} of 184,392 addresses</span><button>View address explorer <ExternalLink size={12} /></button></div>
+              {/* Total is the size of the ranked candidate pool actually fetched; the
+                  backend caps it, and there is no count endpoint for the full graph. */}
+              <div className="panel-footer"><span>Showing {filteredAddresses.length} of {addressRows.length} ranked addresses</span><button>View address explorer <ExternalLink size={12} /></button></div>
             </div>
 
             <div className="panel alerts-panel">
               <div className="panel-header"><div><h3>Live signal feed</h3><p>New flags as they land</p></div><span className="feed-live"><span className="status-pulse" /> STREAMING</span></div>
               <div className="alert-list">
-                {alerts.map((alert) => (
+                {alertsLoading && <div className="alert-empty" role="status"><Loader2 className="alert-spinner" size={14} /> Loading live signals…</div>}
+                {!alertsLoading && alertsError !== "" && <div className="alert-empty error" role="alert"><AlertTriangle size={14} /> {alertsError}</div>}
+                {!alertsLoading && alertsError === "" && alerts.length === 0 && <div className="alert-empty" role="status"><ShieldCheck size={14} /> No alerts at or above {ALERT_THRESHOLD.toFixed(2)}.</div>}
+                {!alertsLoading && alertsError === "" && alerts.map((alert) => (
                   <button
                     className="alert-item"
                     key={alert.id}
                     onClick={() => {
                       playUiSound("radar");
-                      setSelectedAddress(addresses.find((row) => row.score === alert.score) ?? addresses[0]);
+                      // Match on address: the feed and the table share a ranking, so the
+                      // clicked alert is normally present in the table too.
+                      setSelectedAddress(addressRows.find((row) => row.address === alert.address) ?? null);
                     }}
                   >
                     <span className={`alert-icon ${alert.color}`}>{alert.color === "red" ? <AlertTriangle size={14} /> : alert.color === "violet" ? <Radio size={14} /> : <GitBranch size={14} />}</span>
@@ -359,7 +488,28 @@ export default function Home() {
             </div>
           </section>
 
-          <section className="lower-grid"><div className="panel graph-panel"><div className="panel-header"><div><h3>Transaction neighborhood</h3><p>Cluster <span className="mono">{selectedAddress.cluster}</span> · 14 connected addresses</p></div><div className="panel-header-actions"><button className="icon-button small" aria-label="Graph settings"><SlidersHorizontal size={14} /></button><button className="panel-menu" aria-label="Graph options"><MoreHorizontal size={17} /></button></div></div><NetworkMap /><div className="graph-footer"><span><span className="selection-dot" /> Selected <b>{selectedAddress.address}</b></span><button>Open graph explorer <ArrowUpRight size={13} /></button></div></div><div className="panel detail-panel"><div className="panel-header"><div><h3>Address intelligence</h3><p>Explainable risk breakdown</p></div><span className="detail-id">#{selectedAddress.cluster.replace("C-", "")}</span></div><div className="detail-address"><span className="address-dot critical" /><div><strong>{selectedAddress.address}</strong><small>First seen 03 Sep 2026 · Cluster {selectedAddress.cluster}</small></div><button aria-label="Copy address"><Check size={14} /></button></div><div className="score-detail"><div className="score-orbit"><div><span>FUSED RISK</span><strong>{selectedAddress.score.toFixed(2)}</strong><small>HIGH RISK</small></div></div><div className="factor-list"><div><span><i className="factor-dot teal" /> GNN ledger score</span><b>0.82</b></div><div><span><i className="factor-dot violet" /> Traffic anomaly</span><b>0.91</b></div><div><span><i className="factor-dot amber" /> PPR proximity</span><b>0.76</b></div></div></div><div className="confidence-row"><span>MODEL CONFIDENCE</span><b>94.2%</b><div className="confidence-bar"><span /></div></div><button className="outline-action"><Terminal size={14} /> View full address history <ArrowUpRight size={13} /></button></div></section>
+          <section className="lower-grid"><div className="panel graph-panel"><div className="panel-header"><div><h3>Transaction neighborhood</h3><p>{selectedAddress ? <>Selected <span className="mono">{selectedAddress.address}</span></> : "No address selected"}</p></div><div className="panel-header-actions"><button className="icon-button small" aria-label="Graph settings"><SlidersHorizontal size={14} /></button><button className="panel-menu" aria-label="Graph options"><MoreHorizontal size={17} /></button></div></div><NetworkMap /><div className="graph-footer"><span><span className="selection-dot" /> Selected <b>{selectedAddress ? selectedAddress.address : "—"}</b></span><button>Open graph explorer <ArrowUpRight size={13} /></button></div></div><div className="panel detail-panel"><div className="panel-header"><div><h3>Address intelligence</h3><p>Explainable risk breakdown</p></div>{selectedAddress && <span className="detail-id">{selectedAddress.status.toUpperCase()}</span>}</div>
+              {!selectedAddress && <div className="alert-empty" role="status">Select an address to see its risk breakdown.</div>}
+              {selectedAddress && <>
+                <div className="detail-address"><span className={`address-dot ${selectedAddress.status.toLowerCase()}`} /><div><strong>{selectedAddress.address}</strong><small>Elliptic txId · tier {selectedAddress.status}</small></div><button aria-label="Copy address" onClick={() => navigator.clipboard?.writeText(selectedAddress.address)}><Check size={14} /></button></div>
+                <div className="score-detail"><div className="score-orbit"><div><span>FUSED RISK</span><strong>{(detail?.risk_score ?? selectedAddress.score).toFixed(2)}</strong><small>{selectedAddress.status.toUpperCase()}</small></div></div>
+                  {/* Factor values come from GET /address/{id}/risk. Weights are the
+                      backend's own fusion weights, not display constants. */}
+                  <div className="factor-list">
+                    {detailLoading && <div><span>Loading factors…</span><b>—</b></div>}
+                    {!detailLoading && detail && <>
+                      <div><span><i className="factor-dot teal" /> GNN ledger score</span><b>{detail.contributing_factors.gnn_score.toFixed(2)}</b></div>
+                      <div><span><i className="factor-dot violet" /> Traffic anomaly</span><b>{detail.contributing_factors.traffic_anomaly_score.toFixed(2)}</b></div>
+                      <div><span><i className="factor-dot amber" /> PPR proximity</span><b>{detail.contributing_factors.ppr_score.toFixed(2)}</b></div>
+                    </>}
+                    {!detailLoading && !detail && <div><span>Factors unavailable</span><b>—</b></div>}
+                  </div>
+                </div>
+                {/* Fusion weights, straight from the API response. */}
+                <div className="confidence-row"><span>FUSION WEIGHTS</span><b>{detail ? Object.entries(detail.contributing_factors.weights).map(([k, v]) => `${k} ${v}`).join(" · ") : "—"}</b></div>
+                <button className="outline-action"><Terminal size={14} /> View full address history <ArrowUpRight size={13} /></button>
+              </>}
+            </div></section>
 
           <section className="pipeline-panel panel"><div className="pipeline-header"><div><div className="eyebrow"><span className="eyebrow-line" /> MODEL ACTIVITY</div><h2>Live GNN pipeline</h2><p>Watch the latest observation move through graph analysis, traffic correlation, and explainable fusion.</p></div><div className="pipeline-live"><span className="status-pulse" /> INFERENCE ACTIVE <span>184ms</span></div></div><GnnPipeline /><div className="pipeline-caption"><span><Sparkles size={13} /> Animation slowed for observability · real inference completes in milliseconds</span><button onClick={refresh}><Play size={12} /> Replay sequence</button></div></section>
 

@@ -26,6 +26,21 @@ class AddressRisk(BaseModel):
     last_updated: str
 
 
+class RankedAddress(BaseModel):
+    """One row of the dashboard's risk-ranked address table.
+
+    Deliberately carries only fields with a real source. The table also shows
+    cluster, 24h delta, volume and last-seen columns; nothing in the pipeline or
+    the traffic engine supplies those, so they are not invented here -- the
+    frontend renders them as "not available" rather than as plausible numbers.
+    """
+
+    address: str
+    risk_score: float
+    risk_tier: str
+    last_updated: str
+
+
 class Alert(BaseModel):
     id: str
     address: str
