@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import "../platform.css";
 import { HudFrame, ScrambleText, SoundToggle, playUiSound } from "@/components/motion";
+import { ApiError, NetworkError, UnauthorizedError, clearToken, listAlerts, type Alert as ApiAlert } from "@/lib/api";
 import {
   Activity,
   AlertTriangle,
@@ -18,6 +19,7 @@ import {
   GitBranch,
   Globe2,
   Layers,
+  Loader2,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -39,7 +41,13 @@ import {
   Sun,
 } from "lucide-react";
 
-type UserProfile = { name: string; email: string; role: string; initials: string };
+// `agency` is optional and comes from the backend's /auth/me (written into
+// localStorage by Login.tsx). It must stay on this type: the effect below
+// re-serialises `profile` over the stored value on every change, so a field
+// missing here is silently stripped from storage. It deliberately does not
+// share the `email` slot -- that value is bound to the Settings modal's EMAIL
+// input, whose save handler would then persist the agency as an email address.
+type UserProfile = { name: string; email: string; role: string; initials: string; agency?: string };
 
 const defaultProfile: UserProfile = { name: "User", email: "user@sentrix.local", role: "Lead investigator", initials: "US" };
 
@@ -55,7 +63,10 @@ function readAuthenticatedProfile(): UserProfile {
     const user = hostUser || storedUser;
     if (!user) return defaultProfile;
     const name = user.name || defaultProfile.name;
-    return { name, email: user.email || defaultProfile.email, role: user.role || defaultProfile.role, initials: user.initials || getInitials(name) };
+    // `agency` is carried through rather than defaulted: it has no sensible
+    // placeholder, and dropping it here would strip it from storage via the
+    // serialising effect below.
+    return { name, email: user.email || defaultProfile.email, role: user.role || defaultProfile.role, initials: user.initials || getInitials(name), ...(user.agency ? { agency: user.agency } : {}) };
   } catch { return defaultProfile; }
 }
 
@@ -79,7 +90,7 @@ function LogoutModal({ onCancel, onConfirm }: { onCancel: () => void; onConfirm:
 function PreferencesModal({ profile, setProfile, theme, setTheme, notifications, setNotifications, onClose }: { profile: UserProfile; setProfile: (profile: UserProfile) => void; theme: "midnight" | "dusk"; setTheme: (theme: "midnight" | "dusk") => void; notifications: boolean; setNotifications: (enabled: boolean) => void; onClose: () => void }) {
   const [name, setName] = useState(profile.name);
   const [email, setEmail] = useState(profile.email);
-  return <div className="preferences-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="preferences-modal" role="dialog" aria-modal="true" aria-labelledby="preferences-title"><div className="preferences-header"><div><span className="eyebrow"><span className="eyebrow-line" /> ACCOUNT CONTROL</span><h2 id="preferences-title">Settings</h2></div><button className="icon-button" onClick={onClose} aria-label="Close settings"><X size={17} /></button></div><label>DISPLAY NAME<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>EMAIL<input value={email} onChange={(event) => setEmail(event.target.value)} /></label><div className="preference-row"><div><strong>Theme atmosphere</strong><small>Adjust the analyst console contrast.</small></div><div className="segmented-control"><button className={theme === "midnight" ? "selected" : ""} onClick={() => setTheme("midnight")}>Midnight</button><button className={theme === "dusk" ? "selected" : ""} onClick={() => setTheme("dusk")}>Dusk</button></div></div><div className="preference-row"><div><strong>Live notifications</strong><small>Receive new signal and rescoring updates.</small></div><button className={`toggle ${notifications ? "on" : ""}`} onClick={() => setNotifications(!notifications)} aria-label="Toggle live notifications"><span /></button></div><div className="preferences-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={() => { setProfile({ name: name || "User", email: email || "user@sentrix.local", role: profile.role, initials: getInitials(name || "User") }); onClose(); }}>Save changes <Check size={14} /></button></div></section></div>;
+  return <div className="preferences-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="preferences-modal" role="dialog" aria-modal="true" aria-labelledby="preferences-title"><div className="preferences-header"><div><span className="eyebrow"><span className="eyebrow-line" /> ACCOUNT CONTROL</span><h2 id="preferences-title">Settings</h2></div><button className="icon-button" onClick={onClose} aria-label="Close settings"><X size={17} /></button></div><label>DISPLAY NAME<input value={name} onChange={(event) => setName(event.target.value)} /></label><label>EMAIL<input value={email} onChange={(event) => setEmail(event.target.value)} /></label><div className="preference-row"><div><strong>Theme atmosphere</strong><small>Adjust the analyst console contrast.</small></div><div className="segmented-control"><button className={theme === "midnight" ? "selected" : ""} onClick={() => setTheme("midnight")}>Midnight</button><button className={theme === "dusk" ? "selected" : ""} onClick={() => setTheme("dusk")}>Dusk</button></div></div><div className="preference-row"><div><strong>Live notifications</strong><small>Receive new signal and rescoring updates.</small></div><button className={`toggle ${notifications ? "on" : ""}`} onClick={() => setNotifications(!notifications)} aria-label="Toggle live notifications"><span /></button></div><div className="preferences-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={() => { setProfile({ ...profile, name: name || "User", email: email || "user@sentrix.local", role: profile.role, initials: getInitials(name || "User") }); onClose(); }}>Save changes <Check size={14} /></button></div></section></div>;
 }
 
 type Alert = {
@@ -102,13 +113,14 @@ type AddressRow = {
   status: "Critical" | "Review" | "Monitor";
 };
 
-const alerts: Alert[] = [
-  { id: "a1", address: "bc1q…8f2", kind: "HIGH RISK", detail: "PPR proximity + unusual relay", score: 0.87, ago: "2m ago", color: "red" },
-  { id: "a2", address: "3J98…2Xh", kind: "NEW CLUSTER", detail: "14 addresses connected", score: 0.74, ago: "7m ago", color: "amber" },
-  { id: "a3", address: "bc1p…k4m", kind: "TRAFFIC ANOMALY", detail: "Relay timing deviation", score: 0.69, ago: "12m ago", color: "violet" },
-  { id: "a4", address: "1Ffmb…qT7", kind: "SCORE UPDATE", detail: "GNN inference complete", score: 0.53, ago: "18m ago", color: "amber" },
-];
 
+// STILL MOCK, deliberately. The backend exposes no address list/search
+// endpoint -- only GET /address/{address_id}/risk, which scores one known
+// address at a time. There is also no source for this table's `cluster`,
+// `delta`, `volume` or `seen` columns anywhere in the API (AddressRisk
+// carries address, risk_score, contributing_factors, last_updated only), so
+// populating it from real data would mean inventing those values client-side.
+// Replace once a list/search endpoint exists.
 const addresses: AddressRow[] = [
   { address: "bc1q8r3v…8f2", cluster: "C-1048", score: 0.87, delta: "+0.12", volume: "18.42 BTC", seen: "2 min", status: "Critical" },
   { address: "3J98t1Wp…2Xh", cluster: "C-0981", score: 0.74, delta: "+0.08", volume: "6.81 BTC", seen: "7 min", status: "Review" },
@@ -123,6 +135,31 @@ const navItems = [
   { label: "Transaction graph", icon: Network },
   { label: "Address explorer", icon: Search },
 ];
+
+const ALERT_THRESHOLD = 0.8;
+const ALERT_LIMIT = 12;
+
+/** "2m ago" / "3h ago" from an ISO timestamp. */
+function timeAgo(iso: string): string {
+  const seconds = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+  return `${Math.round(seconds / 86400)}d ago`;
+}
+
+/**
+ * Adapt one API alert to the local feed shape.
+ *
+ * `kind` and `color` are derived from the score band rather than invented per
+ * row, and `detail` reuses the server's own `reason` text, so nothing here
+ * fabricates a signal the backend did not report.
+ */
+function toFeedAlert(row: ApiAlert): Alert {
+  const color: Alert["color"] = row.risk_score >= 0.9 ? "red" : row.risk_score >= 0.85 ? "amber" : "violet";
+  const kind = row.risk_score >= 0.9 ? "HIGH RISK" : row.risk_score >= 0.85 ? "ELEVATED" : "REVIEW";
+  return { id: row.id, address: row.address, kind, detail: row.reason, score: row.risk_score, ago: timeAgo(row.flagged_at), color };
+}
 
 function RiskScore({ value, size = "md" }: { value: number; size?: "sm" | "md" | "lg" }) {
   const color = value >= 0.8 ? "critical" : value >= 0.6 ? "review" : "monitor";
@@ -214,6 +251,41 @@ export default function Home() {
   const [activeNav, setActiveNav] = useState("Overview");
   const [query, setQuery] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
+  // Live alerts from GET /alerts. Mapped onto the existing local `Alert` type
+  // so the rendering below is unchanged: the backend sends
+  // {id, address, risk_score, reason, flagged_at} and this fills in the
+  // presentational fields (kind/detail/color/ago) that have no API equivalent.
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [alertsLoading, setAlertsLoading] = useState(true);
+  const [alertsError, setAlertsError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setAlertsLoading(true);
+    setAlertsError("");
+    listAlerts(ALERT_THRESHOLD, ALERT_LIMIT)
+      .then((rows) => {
+        if (cancelled) return;
+        setAlerts(rows.map(toFeedAlert));
+        setAlertsLoading(false);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setAlertsLoading(false);
+        // NetworkError extends ApiError, so it is tested first; UnauthorizedError
+        // means the token expired mid-session, which is the route guard's case.
+        if (error instanceof UnauthorizedError) {
+          clearToken();
+          window.location.href = "/login";
+          return;
+        }
+        if (error instanceof NetworkError) setAlertsError("Can't reach the SentriX API.");
+        else if (error instanceof ApiError) setAlertsError(`Alerts unavailable (HTTP ${error.status}).`);
+        else setAlertsError("Alerts unavailable.");
+      });
+    return () => { cancelled = true; };
+  }, []);
+
   const [selectedAddress, setSelectedAddress] = useState(addresses[0]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [querySent, setQuerySent] = useState(false);
@@ -340,7 +412,10 @@ export default function Home() {
             <div className="panel alerts-panel">
               <div className="panel-header"><div><h3>Live signal feed</h3><p>New flags as they land</p></div><span className="feed-live"><span className="status-pulse" /> STREAMING</span></div>
               <div className="alert-list">
-                {alerts.map((alert) => (
+                {alertsLoading && <div className="alert-empty" role="status"><Loader2 className="alert-spinner" size={14} /> Loading live signals…</div>}
+                {!alertsLoading && alertsError !== "" && <div className="alert-empty error" role="alert"><AlertTriangle size={14} /> {alertsError}</div>}
+                {!alertsLoading && alertsError === "" && alerts.length === 0 && <div className="alert-empty" role="status"><ShieldCheck size={14} /> No alerts at or above {ALERT_THRESHOLD.toFixed(2)}.</div>}
+                {!alertsLoading && alertsError === "" && alerts.map((alert) => (
                   <button
                     className="alert-item"
                     key={alert.id}
