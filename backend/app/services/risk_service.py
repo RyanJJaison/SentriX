@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
-from app.models.schemas import Alert, AddressRisk, GraphEdge, GraphNode, RiskFactors, SubgraphResponse
+from app.models.schemas import Alert, AddressRisk, GraphEdge, GraphNode, RankedAddress, RiskFactors, SubgraphResponse
 from app.services import traffic_correlation
 
 log = logging.getLogger(__name__)
@@ -143,54 +143,96 @@ def get_address_risk(address: str) -> AddressRisk:
 _ALERT_CANDIDATE_POOL = 500
 
 
-def list_alerts(threshold: float = 0.8, limit: int = 50) -> list[Alert]:
-    """Highest-risk addresses from the Graph Analysis Engine's exported scores.
+def _candidate_addresses() -> list[str]:
+    """Bounded pool of the addresses most worth fusing, highest graph score first.
 
     Candidates come from `output/scores.jsonl` (via `_load_graph_scores`, the
     same loader `_compute_address_risk` uses), pre-ranked by the exported GNN
-    score so only a bounded pool is re-fused. Each candidate is then scored
-    through `get_address_risk`, so an alert's `risk_score` is the same fused
-    value `/address/{id}/risk` reports for that address rather than the raw
-    graph score.
+    score. Only a capped pool is returned: fusing is cheap but not free (it adds
+    the live traffic component per address), and every consumer displays a top
+    slice rather than all ~204k exported addresses.
+
+    Ranking here is by the *exported* GNN score, which only decides which
+    addresses are worth fusing; callers filter and re-sort on the fused score.
+    The GNN term carries the largest weight (0.6), so the ordering is a good
+    proxy for picking the pool.
 
     Falls back to the previous synthetic pool when no export is present, which
-    keeps the endpoint (and the dashboard) working without the pipeline.
+    keeps the API (and the dashboard) working without the pipeline.
     """
     graph_scores = _load_graph_scores()
-    if graph_scores:
-        # Rank by exported GNN score to pick the pool. The fused score is what
-        # gets filtered below; this only decides which addresses are worth
-        # fusing, and the GNN term carries the largest weight (0.6).
-        candidate_addresses = [
-            address
-            for address, _ in sorted(
-                graph_scores.items(), key=lambda item: item[1][0], reverse=True
-            )[:_ALERT_CANDIDATE_POOL]
-        ]
-    else:
-        # No pipeline output on disk -- keep the demo pool so the API still
-        # returns something rather than an empty feed.
-        candidate_addresses = [f"1MockAddr{i:04d}" for i in range(200)]
+    if not graph_scores:
+        # No pipeline output on disk -- keep the demo pool so callers still
+        # return something rather than an empty list.
+        return [f"1MockAddr{i:04d}" for i in range(200)]
+    return [
+        address
+        for address, _ in sorted(
+            graph_scores.items(), key=lambda item: item[1][0], reverse=True
+        )[:_ALERT_CANDIDATE_POOL]
+    ]
 
-    alerts: list[Alert] = []
-    for addr in candidate_addresses:
-        risk = get_address_risk(addr)
-        if risk.risk_score >= threshold:
-            alerts.append(
-                Alert(
-                    id=hashlib.sha1(addr.encode()).hexdigest()[:10],
-                    address=addr,
-                    risk_score=risk.risk_score,
-                    reason="Fused GNN + traffic-anomaly score above threshold",
-                    flagged_at=risk.last_updated,
-                )
-            )
 
-    # Sort before truncating: the previous implementation broke out of the loop
-    # at `limit` and sorted afterwards, so it returned the top N of the first N
-    # matches rather than the N highest-scoring addresses overall.
-    alerts.sort(key=lambda a: a.risk_score, reverse=True)
-    return alerts[:limit]
+def _ranked_risks(threshold: float, limit: int) -> list[AddressRisk]:
+    """Fused risk for the candidate pool, filtered by `threshold`, best first.
+
+    Shared by `list_alerts` and `list_ranked_addresses` so the ranking exists in
+    one place. Each candidate is scored through `get_address_risk`, so the
+    `risk_score` here is the same fused value `/address/{id}/risk` reports for
+    that address rather than the raw graph score.
+
+    Sorting happens before truncation deliberately: truncating first would
+    return the top N of the first N matches rather than the N highest-scoring
+    addresses overall.
+    """
+    risks = [
+        risk
+        for risk in (get_address_risk(addr) for addr in _candidate_addresses())
+        if risk.risk_score >= threshold
+    ]
+    risks.sort(key=lambda r: r.risk_score, reverse=True)
+    return risks[:limit]
+
+
+def risk_tier(score: float) -> str:
+    """Bucket a fused score into the dashboard's three display tiers."""
+    if score >= 0.8:
+        return "Critical"
+    if score >= 0.6:
+        return "Review"
+    return "Monitor"
+
+
+def list_alerts(threshold: float = 0.8, limit: int = 50) -> list[Alert]:
+    """Highest-risk addresses as alert records."""
+    return [
+        Alert(
+            id=hashlib.sha1(risk.address.encode()).hexdigest()[:10],
+            address=risk.address,
+            risk_score=risk.risk_score,
+            reason="Fused GNN + traffic-anomaly score above threshold",
+            flagged_at=risk.last_updated,
+        )
+        for risk in _ranked_risks(threshold, limit)
+    ]
+
+
+def list_ranked_addresses(threshold: float = 0.0, limit: int = 50) -> list[RankedAddress]:
+    """Highest-risk addresses for the dashboard's risk-ranked table.
+
+    Same pool, same fused scores and same ordering as `list_alerts` -- this
+    exposes the ranking as table rows instead of alert records, so the two
+    panels cannot disagree about which addresses are riskiest.
+    """
+    return [
+        RankedAddress(
+            address=risk.address,
+            risk_score=risk.risk_score,
+            risk_tier=risk_tier(risk.risk_score),
+            last_updated=risk.last_updated,
+        )
+        for risk in _ranked_risks(threshold, limit)
+    ]
 
 
 def get_subgraph(address: str, depth: int = 1) -> SubgraphResponse:
