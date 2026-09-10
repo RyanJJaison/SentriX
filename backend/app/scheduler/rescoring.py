@@ -22,10 +22,12 @@ scheduler = BackgroundScheduler()
 
 
 # How many of the top-ranked addresses to refresh per cycle. The dashboard
-# displays a top slice (25 rows, 12 alerts), so refreshing the top 50 covers
-# everything on screen with headroom for re-ordering, without re-fusing all 500
-# pool candidates every five minutes.
-RESCORE_POOL = 50
+# displays a top slice (25 rows, 12 alerts); refreshing the top 100 covers that
+# with enough headroom that an address near the cutoff does not churn out of the
+# refreshed set as the live traffic term shifts the fused ranking between
+# cycles. Cheap to widen: `top_ranked_addresses` reads through the score cache,
+# so already-cached addresses cost a dict lookup rather than a re-fuse.
+RESCORE_POOL = 100
 
 # Retained so the demo addresses keep a fresh timestamp too. They are not in the
 # exported graph, so they would otherwise fall out of the rescoring set entirely
