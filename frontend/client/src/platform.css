@@ -162,3 +162,11 @@
 .alert-spinner { animation: alertSpin .9s linear infinite; }
 @keyframes alertSpin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .alert-spinner { animation: none; } }
+
+/* Risk table non-data states and the tier tag that replaced the cluster column. */
+.table-state { padding: 20px 12px; color: var(--platform-muted, #8e948a); font-size: 10px; text-align: center; }
+.table-state.error { color: #ed9695; }
+.tier-tag { display: inline-block; padding: 2px 7px; border: 1px solid currentColor; border-radius: 4px; font-size: 9px; letter-spacing: .06em; text-transform: uppercase; }
+.tier-tag.critical { color: #ed9695; }
+.tier-tag.review { color: #e5c07b; }
+.tier-tag.monitor { color: #8e948a; }

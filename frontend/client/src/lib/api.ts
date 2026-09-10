@@ -54,6 +54,14 @@ export interface Alert {
   flagged_at: string;
 }
 
+/** `RankedAddress` */
+export interface RankedAddress {
+  address: string;
+  risk_score: number;
+  risk_tier: string;
+  last_updated: string;
+}
+
 // --------------------------------------------------------------------------- //
 // Errors
 // --------------------------------------------------------------------------- //
@@ -282,4 +290,19 @@ export function listAlerts(threshold = 0.8, limit = 50): Promise<Alert[]> {
     limit: String(Math.min(Math.max(Math.trunc(limit), 1), 500)),
   });
   return authFetch<Alert[]>(`/alerts?${params}`);
+}
+
+/**
+ * `GET /address/ranked`
+ *
+ * Risk-ranked addresses for the dashboard table. Shares its candidate pool and
+ * fused scores with `/alerts`, so both panels agree on the ranking. Bounds
+ * mirror the backend's (`threshold` 0-1, `limit` 1-500) to avoid a 422.
+ */
+export function listRankedAddresses(threshold = 0, limit = 25): Promise<RankedAddress[]> {
+  const params = new URLSearchParams({
+    threshold: String(Math.min(Math.max(threshold, 0), 1)),
+    limit: String(Math.min(Math.max(Math.trunc(limit), 1), 500)),
+  });
+  return authFetch<RankedAddress[]>(`/address/ranked?${params}`);
 }
