@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useRef } from "react";
+import React, { createContext, useContext, useEffect, useMemo, useRef } from "react";
 
 interface SmoothScrollContextType {
   scrollTo: (target: string | number, offset?: number) => void;
@@ -10,96 +10,102 @@ const SmoothScrollContext = createContext<SmoothScrollContextType>({
 
 export const useSmoothScroll = () => useContext(SmoothScrollContext);
 
+const prefersReducedMotion = () =>
+  typeof window !== "undefined" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/**
+ * Single, centralized scroll system.
+ *
+ * Free scrolling (wheel / trackpad / touch / keyboard) is left 100% native — no
+ * hijacking, no per-frame window.scrollTo, no competing smooth-scroll engine.
+ *
+ * `scrollTo()` is the ONLY programmatic smoothing path. It runs a single
+ * requestAnimationFrame tween for explicit navigation jumps (nav links, section
+ * indicator, "back to top") and immediately yields to the user: any real wheel /
+ * touch / key input cancels the tween so it can never fight input.
+ */
 export function SmoothScrollProvider({ children }: { children: React.ReactNode }) {
-  const isScrolling = useRef(false);
+  const rafRef = useRef<number | null>(null);
 
-  const scrollTo = (target: string | number, offset = 0) => {
-    if (typeof target === "number") {
-      window.scrollTo({ top: target + offset, behavior: "smooth" });
-      return;
-    }
+  const value = useMemo<SmoothScrollContextType>(() => {
+    const cancel = () => {
+      if (rafRef.current != null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
 
-    const cleanId = target.replace(/^#/, "");
-    const el = document.getElementById(cleanId);
-    if (el) {
+    const resolveTop = (target: string | number, offset: number): number | null => {
+      const maxTop = Math.max(
+        0,
+        document.documentElement.scrollHeight - window.innerHeight
+      );
+      if (typeof target === "number") {
+        return Math.min(Math.max(0, target + offset), maxTop);
+      }
+      const el = document.getElementById(target.replace(/^#/, ""));
+      if (!el) return null;
       const top = el.getBoundingClientRect().top + window.scrollY + offset;
-      window.scrollTo({ top, behavior: "smooth" });
-    }
-  };
+      return Math.min(Math.max(0, top), maxTop);
+    };
+
+    const scrollTo = (target: string | number, offset = 0) => {
+      const to = resolveTop(target, offset);
+      if (to == null) return;
+
+      cancel();
+
+      if (prefersReducedMotion()) {
+        window.scrollTo(0, to);
+        return;
+      }
+
+      const from = window.scrollY;
+      const distance = to - from;
+      if (Math.abs(distance) < 2) {
+        window.scrollTo(0, to);
+        return;
+      }
+
+      // Duration scales with distance but stays snappy and bounded.
+      const duration = Math.min(900, Math.max(320, Math.abs(distance) * 0.45));
+      const start = performance.now();
+      // easeInOutCubic
+      const ease = (t: number) =>
+        t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+
+      const onUserInterrupt = () => cancel();
+      window.addEventListener("wheel", onUserInterrupt, { passive: true });
+      window.addEventListener("touchstart", onUserInterrupt, { passive: true });
+      window.addEventListener("keydown", onUserInterrupt);
+
+      const step = (now: number) => {
+        const p = Math.min(1, (now - start) / duration);
+        window.scrollTo(0, Math.round(from + distance * ease(p)));
+        if (p < 1) {
+          rafRef.current = requestAnimationFrame(step);
+        } else {
+          rafRef.current = null;
+          window.removeEventListener("wheel", onUserInterrupt);
+          window.removeEventListener("touchstart", onUserInterrupt);
+          window.removeEventListener("keydown", onUserInterrupt);
+        }
+      };
+      rafRef.current = requestAnimationFrame(step);
+    };
+
+    return { scrollTo };
+  }, []);
 
   useEffect(() => {
-    // Check for reduced motion preference
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      return;
-    }
-
-    // Only apply kinetic inertia wheel damping on devices with mouse wheel (not touch)
-    let currentY = window.scrollY;
-    let targetY = window.scrollY;
-    let animationId: number | null = null;
-    const friction = 0.085; // Alche-like fluid gliding friction
-
-    const onWheel = (e: WheelEvent) => {
-      // Don't intercept if scrolling inside an overflow element (like a modal or table)
-      let target = e.target as HTMLElement | null;
-      while (target && target !== document.body) {
-        const overflowY = window.getComputedStyle(target).overflowY;
-        if ((overflowY === "auto" || overflowY === "scroll") && target.scrollHeight > target.clientHeight) {
-          return; // Let native container scroll
-        }
-        target = target.parentElement;
-      }
-
-      // Delta mode normalization
-      let delta = e.deltaY;
-      if (e.deltaMode === 1) delta *= 40; // lines
-      if (e.deltaMode === 2) delta *= 800; // pages
-
-      // Clamp delta to prevent erratic jumps
-      const maxDelta = 140;
-      const clampedDelta = Math.sign(delta) * Math.min(Math.abs(delta), maxDelta);
-
-      targetY = Math.max(0, Math.min(document.documentElement.scrollHeight - window.innerHeight, targetY + clampedDelta));
-
-      if (!isScrolling.current) {
-        isScrolling.current = true;
-        animateScroll();
-      }
-    };
-
-    const animateScroll = () => {
-      currentY += (targetY - currentY) * friction;
-
-      if (Math.abs(targetY - currentY) > 0.5) {
-        window.scrollTo(0, currentY);
-        animationId = requestAnimationFrame(animateScroll);
-      } else {
-        window.scrollTo(0, targetY);
-        currentY = targetY;
-        isScrolling.current = false;
-        if (animationId) cancelAnimationFrame(animationId);
-      }
-    };
-
-    const onNativeScroll = () => {
-      if (!isScrolling.current) {
-        currentY = window.scrollY;
-        targetY = window.scrollY;
-      }
-    };
-
-    window.addEventListener("wheel", onWheel, { passive: true });
-    window.addEventListener("scroll", onNativeScroll, { passive: true });
-
     return () => {
-      window.removeEventListener("wheel", onWheel);
-      window.removeEventListener("scroll", onNativeScroll);
-      if (animationId) cancelAnimationFrame(animationId);
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
   }, []);
 
   return (
-    <SmoothScrollContext.Provider value={{ scrollTo }}>
+    <SmoothScrollContext.Provider value={value}>
       {children}
     </SmoothScrollContext.Provider>
   );

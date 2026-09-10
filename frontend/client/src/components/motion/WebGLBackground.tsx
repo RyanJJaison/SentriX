@@ -19,6 +19,13 @@ export function WebGLBackground({ opacity = 0.85, className = "" }: WebGLBackgro
     let width = (canvas.width = window.innerWidth);
     let height = (canvas.height = window.innerHeight);
 
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    // Cap the loop — the sphere rotates slowly, so ~40fps is visually identical
+    // while leaving a third of every frame budget free for scrolling.
+    const FRAME_MS = 1000 / 40;
+    let lastPaint = 0;
+    let paused = false;
+
     // Mouse tracking with smooth spring easing
     const mouse = { x: 0, y: 0, targetX: 0, targetY: 0 };
     // Scroll tracking
@@ -39,9 +46,20 @@ export function WebGLBackground({ opacity = 0.85, className = "" }: WebGLBackgro
       targetScrollY = window.scrollY;
     };
 
+    const onVisibility = () => {
+      const wasPaused = paused;
+      paused = document.hidden;
+      if (wasPaused && !paused && !reduceMotion) {
+        lastPaint = 0;
+        cancelAnimationFrame(animationFrameId);
+        animationFrameId = requestAnimationFrame(render);
+      }
+    };
+
     window.addEventListener("resize", onResize);
-    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mousemove", onMouseMove, { passive: true });
     window.addEventListener("scroll", onScroll, { passive: true });
+    document.addEventListener("visibilitychange", onVisibility);
 
     // 3D Geometry: Cryptographic Icosahedron / Geodesic Sphere Vertices
     const phi = (1 + Math.sqrt(5)) / 2;
@@ -107,20 +125,29 @@ export function WebGLBackground({ opacity = 0.85, className = "" }: WebGLBackgro
     let rotZ = 0.1;
     let pulseTime = 0;
 
-    // Render loop
-    const render = () => {
+    // Render loop — time-capped and pause-aware so it never starves scrolling.
+    const render = (now?: number) => {
+      if (paused) return;
+      if (!reduceMotion) animationFrameId = requestAnimationFrame(render);
+      const t = now ?? performance.now();
+      if (t - lastPaint < FRAME_MS) return;
+      // Time-scale every increment to a 60fps baseline so the capped loop keeps
+      // the exact same animation speed as the old uncapped one.
+      const dt = lastPaint ? Math.min(3, (t - lastPaint) / (1000 / 60)) : 1;
+      lastPaint = t;
+
       // Ease mouse and scroll
-      mouse.x += (mouse.targetX - mouse.x) * 0.05;
-      mouse.y += (mouse.targetY - mouse.y) * 0.05;
-      scrollY += (targetScrollY - scrollY) * 0.08;
+      mouse.x += (mouse.targetX - mouse.x) * 0.05 * dt;
+      mouse.y += (mouse.targetY - mouse.y) * 0.05 * dt;
+      scrollY += (targetScrollY - scrollY) * 0.08 * dt;
 
       ctx.clearRect(0, 0, width, height);
 
       // Base auto-rotation influenced by cursor and scroll
-      rotY += 0.004 + mouse.x * 0.005;
-      rotX += 0.002 + mouse.y * 0.005;
+      rotY += (0.004 + mouse.x * 0.005) * dt;
+      rotX += (0.002 + mouse.y * 0.005) * dt;
       rotZ = scrollY * 0.0008;
-      pulseTime += 0.025;
+      pulseTime += 0.025 * dt;
 
       const scale = Math.min(width, height) * 0.28;
       // Center position shifted slightly right/responsive like Alche hero
@@ -158,8 +185,8 @@ export function WebGLBackground({ opacity = 0.85, className = "" }: WebGLBackgro
       ctx.save();
       for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
-        p.pulse += 0.03;
-        p.y += p.speed;
+        p.pulse += 0.03 * dt;
+        p.y += p.speed * dt;
         if (p.y > 2) p.y = -2;
 
         const [px, py, pz] = project(p.x, p.y, p.z);
@@ -237,16 +264,23 @@ export function WebGLBackground({ opacity = 0.85, className = "" }: WebGLBackgro
         ctx.fill();
       }
 
-      animationFrameId = requestAnimationFrame(render);
     };
 
-    render();
+    if (reduceMotion) {
+      // Draw a single static frame, no ongoing loop.
+      lastPaint = -Infinity;
+      render(performance.now());
+    } else {
+      animationFrameId = requestAnimationFrame(render);
+    }
 
     return () => {
+      paused = true;
       cancelAnimationFrame(animationFrameId);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("scroll", onScroll);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 

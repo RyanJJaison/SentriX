@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownRight, ArrowRight, ArrowUpRight, Check, ChevronLeft, ChevronRight, Copy, Lock, Menu, Plus, Radio, ShieldCheck, Terminal, X } from "lucide-react";
 import {
   WebGLBackground,
@@ -8,6 +8,7 @@ import {
   HudFrame,
   SoundToggle,
   SentrixIntro,
+  useSmoothScroll,
   playUiSound,
 } from "@/components/motion";
 
@@ -63,25 +64,129 @@ const capabilities = [
 
 function NetworkField({ compact = false }: { compact?: boolean }) {
   const [selected, setSelected] = useState<NodeData>(nodes[0]);
-  const [pointer, setPointer] = useState({ x: 0, y: 0 });
   const [active, setActive] = useState(false);
   const selectedIndex = nodes.findIndex((node) => node.id === selected.id);
-  return <div className={`network-field ${compact ? "compact" : ""}`} onPointerMove={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setPointer({ x: ((event.clientX - rect.left) / rect.width - .5) * 18, y: ((event.clientY - rect.top) / rect.height - .5) * 18 }); }} onPointerEnter={() => setActive(true)} onPointerLeave={() => { setActive(false); setPointer({ x: 0, y: 0 }); }}>
+
+  // Pointer parallax: no React state on move. Cache the rect on enter, then a
+  // rAF-batched handler writes the two <g> transforms straight to the DOM.
+  const linesRef = useRef<SVGGElement | null>(null);
+  const nodesRef = useRef<SVGGElement | null>(null);
+  const rectRef = useRef<DOMRect | null>(null);
+  const rafRef = useRef<number>(0);
+  const px = useRef(0);
+  const py = useRef(0);
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
+
+  const applyParallax = () => {
+    rafRef.current = 0;
+    if (linesRef.current) linesRef.current.style.transform = `translate(${px.current * -0.06}px, ${py.current * -0.06}px)`;
+    if (nodesRef.current) nodesRef.current.style.transform = `translate(${px.current * 0.12}px, ${py.current * 0.12}px)`;
+  };
+  const onMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const rect = rectRef.current ?? event.currentTarget.getBoundingClientRect();
+    rectRef.current = rect;
+    px.current = ((event.clientX - rect.left) / rect.width - 0.5) * 18;
+    py.current = ((event.clientY - rect.top) / rect.height - 0.5) * 18;
+    if (!rafRef.current) rafRef.current = requestAnimationFrame(applyParallax);
+  };
+  const onEnter = (event: React.PointerEvent<HTMLDivElement>) => {
+    rectRef.current = event.currentTarget.getBoundingClientRect();
+    setActive(true);
+  };
+  const onLeave = () => {
+    setActive(false);
+    rectRef.current = null;
+    px.current = 0;
+    py.current = 0;
+    if (!rafRef.current) rafRef.current = requestAnimationFrame(applyParallax);
+  };
+
+  return <div className={`network-field ${compact ? "compact" : ""}`} onPointerMove={onMove} onPointerEnter={onEnter} onPointerLeave={onLeave}>
     <div className="network-noise" /><div className="network-crosshair" />
     <svg className="network-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="Interactive transaction network">
       <defs><linearGradient id="signalLine" x1="0" x2="1"><stop offset="0" stopColor="#2dd4bf" stopOpacity=".06" /><stop offset=".5" stopColor="#a7f3e0" stopOpacity=".72" /><stop offset="1" stopColor="#7f77dd" stopOpacity=".14" /></linearGradient><filter id="softGlow"><feGaussianBlur stdDeviation=".55" /></filter></defs>
-      <g className="network-lines" style={{ transform: `translate(${pointer.x * -.06}px, ${pointer.y * -.06}px)` }}>{edges.map(([from, to, label], index) => { const a = nodes.find((node) => node.id === from)!; const b = nodes.find((node) => node.id === to)!; return <g key={`${from}-${to}`}><path d={`M${a.x} ${a.y} C ${(a.x + b.x) / 2} ${a.y - 12 - index * 1.3}, ${(a.x + b.x) / 2} ${b.y + 12}, ${b.x} ${b.y}`} /><text x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 1}>{label}</text></g>; })}</g>
+      <g ref={linesRef} className="network-lines">{edges.map(([from, to, label], index) => { const a = nodes.find((node) => node.id === from)!; const b = nodes.find((node) => node.id === to)!; return <g key={`${from}-${to}`}><path d={`M${a.x} ${a.y} C ${(a.x + b.x) / 2} ${a.y - 12 - index * 1.3}, ${(a.x + b.x) / 2} ${b.y + 12}, ${b.x} ${b.y}`} /><text x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 1}>{label}</text></g>; })}</g>
       <g className="network-particles">{[18, 31, 47, 64, 79].map((cx, i) => <circle key={cx} cx={cx} cy={32 + (i % 2) * 29} r=".6" style={{ animationDelay: `${i * .25}s` }} />)}</g>
-      <g className="network-nodes" style={{ transform: `translate(${pointer.x * .12}px, ${pointer.y * .12}px)` }}>{nodes.map((node, index) => <g key={node.id} className={`data-node ${selected.id === node.id ? "is-selected" : ""} tone-${node.tone}`} onClick={() => setSelected(node)} role="button" tabIndex={0} aria-label={node.label} onKeyDown={(event) => event.key === "Enter" && setSelected(node)}><circle className="node-aura" cx={node.x} cy={node.y} r={node.r * 1.9} /><circle className="node-core" cx={node.x} cy={node.y} r={node.r / 2.2} /><circle className="node-ring" cx={node.x} cy={node.y} r={node.r} style={{ animationDelay: `${index * .22}s` }} /></g>)}</g>
+      <g ref={nodesRef} className="network-nodes">{nodes.map((node, index) => <g key={node.id} className={`data-node ${selected.id === node.id ? "is-selected" : ""} tone-${node.tone}`} onClick={() => setSelected(node)} role="button" tabIndex={0} aria-label={node.label} onKeyDown={(event) => event.key === "Enter" && setSelected(node)}><circle className="node-aura" cx={node.x} cy={node.y} r={node.r * 1.9} /><circle className="node-core" cx={node.x} cy={node.y} r={node.r / 2.2} /><circle className="node-ring" cx={node.x} cy={node.y} r={node.r} style={{ animationDelay: `${index * .22}s` }} /></g>)}</g>
     </svg>
     <div className="network-label network-label-top"><span>LIVE GRAPH / 08.09.26</span><span>BLOCK #912,481</span></div><div className={`network-selected ${active ? "is-active" : ""}`}><div className="selected-kicker"><span className="signal-dot" /> SELECTED SIGNAL <button onClick={() => setSelected(nodes[selectedIndex === nodes.length - 1 ? 0 : selectedIndex + 1])} aria-label="Select next signal"><ArrowRight size={12} /></button></div><strong>{selected.label}</strong><span>{selected.value}</span></div><div className="network-legend"><span><i className="legend-green" /> ledger</span><span><i className="legend-violet" /> entity</span><span><i className="legend-red" /> anomaly</span></div><div className="network-hint"><span>MOVE TO EXPLORE</span><span>CLICK A NODE</span></div>
   </div>;
 }
 
-function Cursor() { const [position, setPosition] = useState({ x: -100, y: -100 }); const [trail, setTrail] = useState({ x: -100, y: -100 }); const [hover, setHover] = useState(false); useEffect(() => { let frame = 0; let current = { x: -100, y: -100 }; const move = (event: MouseEvent) => setPosition({ x: event.clientX, y: event.clientY }); const animate = () => { current = { x: current.x + (position.x - current.x) * .18, y: current.y + (position.y - current.y) * .18 }; setTrail(current); frame = requestAnimationFrame(animate); }; const enter = () => setHover(true); const leave = () => setHover(false); window.addEventListener("mousemove", move); const interactive = Array.from(document.querySelectorAll("a, button, [role=button]")); interactive.forEach((element) => { element.addEventListener("mouseenter", enter); element.addEventListener("mouseleave", leave); }); frame = requestAnimationFrame(animate); return () => { cancelAnimationFrame(frame); window.removeEventListener("mousemove", move); interactive.forEach((element) => { element.removeEventListener("mouseenter", enter); element.removeEventListener("mouseleave", leave); }); }; }, [position]); return <><div className={`custom-cursor-trail ${hover ? "hover" : ""}`} style={{ left: trail.x, top: trail.y }} /><div className={`custom-cursor ${hover ? "hover" : ""}`} style={{ left: position.x, top: position.y }}><span>{hover ? "VIEW" : ""}</span></div></>; }
+function Cursor() {
+  const dotRef = useRef<HTMLDivElement | null>(null);
+  const trailRef = useRef<HTMLDivElement | null>(null);
+  const [hover, setHover] = useState(false);
+  const [enabled] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      window.matchMedia("(hover: hover) and (pointer: fine)").matches &&
+      !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+
+  useEffect(() => {
+    if (!enabled) return;
+    // High-frequency values live in refs, never React state. One rAF loop writes
+    // transforms straight to the DOM (compositor-only, no re-render, no layout).
+    const target = { x: -100, y: -100 };
+    const trail = { x: -100, y: -100 };
+    let frame = 0;
+    const place = (el: HTMLElement | null, x: number, y: number) => {
+      if (el) el.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
+    };
+    place(dotRef.current, target.x, target.y);
+    place(trailRef.current, trail.x, trail.y);
+
+    const move = (e: PointerEvent) => {
+      target.x = e.clientX;
+      target.y = e.clientY;
+      place(dotRef.current, target.x, target.y);
+    };
+    const tick = () => {
+      trail.x += (target.x - trail.x) * 0.18;
+      trail.y += (target.y - trail.y) * 0.18;
+      place(trailRef.current, trail.x, trail.y);
+      frame = requestAnimationFrame(tick);
+    };
+    // Delegated hover — survives DOM changes, no querySelectorAll sweep.
+    const over = (e: PointerEvent) => {
+      if ((e.target as HTMLElement)?.closest?.("a, button, [role=button]")) setHover(true);
+    };
+    const out = (e: PointerEvent) => {
+      if ((e.target as HTMLElement)?.closest?.("a, button, [role=button]")) setHover(false);
+    };
+
+    window.addEventListener("pointermove", move, { passive: true });
+    document.addEventListener("pointerover", over, { passive: true });
+    document.addEventListener("pointerout", out, { passive: true });
+    frame = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerover", over);
+      document.removeEventListener("pointerout", out);
+    };
+  }, [enabled]);
+
+  if (!enabled) return null;
+  return (
+    <>
+      <div ref={trailRef} className={`custom-cursor-trail ${hover ? "hover" : ""}`} />
+      <div ref={dotRef} className={`custom-cursor ${hover ? "hover" : ""}`}>
+        <span>{hover ? "VIEW" : ""}</span>
+      </div>
+    </>
+  );
+}
 function HeroLogo({ onNavigate }: { onNavigate: (id: string) => void }) { const [tilt, setTilt] = useState({ x: 0, y: 0 }); const onMove = (event: React.PointerEvent<HTMLDivElement>) => { const rect = event.currentTarget.getBoundingClientRect(); setTilt({ x: ((event.clientY - rect.top) / rect.height - .5) * -8, y: ((event.clientX - rect.left) / rect.width - .5) * 10 }); }; const orbitNodes = [{ label: "SYSTEM", id: "system", className: "orbit-system" }, { label: "WORKS", id: "intelligence", className: "orbit-intelligence" }, { label: "SERVICES", id: "capabilities", className: "orbit-services" }, { label: "CONTACT", id: "contact", className: "orbit-contact" }]; return <div className="hero-logo-object" onPointerMove={onMove} onPointerLeave={() => setTilt({ x: 0, y: 0 })} aria-label="Interactive SentriX X logo"><div className="hero-logo-halo" /><div className="hero-logo-depth depth-one" /><div className="hero-logo-depth depth-two" /><div className="hero-logo-face" style={{ transform: `rotateX(${tilt.x}deg) rotateY(${tilt.y}deg)` }}><svg viewBox="0 0 240 180" aria-hidden="true"><path className="z-mark-stroke" d="M36 42L204 138M204 42L36 138" /><path className="z-mark-glow" d="M36 42L204 138M204 42L36 138" pathLength="320" /><circle className="z-mark-dot" cx="36" cy="42" r="5" /></svg></div><span className="hero-logo-signal" /><div className="orbit-connector orbit-connector-v" /><div className="orbit-connector orbit-connector-h" />{orbitNodes.map((node) => <button key={node.id} className={`orbit-nav-node ${node.className}`} onClick={() => onNavigate(node.id)}><i /><span>{node.label}</span></button>)}</div>; }
 function LoaderMark() { return <div className="loader-mark reference-loader-mark"><svg viewBox="0 0 240 180" aria-hidden="true"><path className="reference-loader-draw" d="M36 42L204 138M204 42L36 138" /><path className="reference-loader-fill" d="M40 50h120l-120 80h120l-18 10H21l120-80H22z" /></svg></div>; }
-function Reveal({ children, className = "" }: { children: React.ReactNode; className?: string }) { const [visible, setVisible] = useState(false); useEffect(() => { const element = document.querySelector(`[data-reveal="${className}"]`); if (!element) return; const observer = new IntersectionObserver(([entry]) => { if (entry.isIntersecting) { setVisible(true); observer.disconnect(); } }, { threshold: .15 }); observer.observe(element); return () => observer.disconnect(); }, [className]); return <div data-reveal={className} className={`reveal ${visible ? "visible" : ""} ${className}`}>{children}</div>; }
+// Layout wrapper. The `.reveal` / `.visible` classes carry no CSS in this
+// project, so the former IntersectionObserver + querySelector had no visual
+// effect — it only cost an observer and a re-render per instance. Kept as a
+// plain wrapper so markup/classnames are unchanged.
+function Reveal({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+  return <div data-reveal={className} className={`reveal visible ${className}`}>{children}</div>;
+}
 
 
 
@@ -318,9 +423,9 @@ export default function Home() {
   const [activeCapability, setActiveCapability] = useState(0);
   const [platformOpening, setPlatformOpening] = useState(false);
   const [platformProgress, setPlatformProgress] = useState(0);
+  const { scrollTo: smoothScrollTo } = useSmoothScroll();
   const scrollTo = (id: string) => {
-    const clean = id.replace(/^#/, "");
-    document.getElementById(clean)?.scrollIntoView({ behavior: "smooth" });
+    smoothScrollTo(id.replace(/^#/, ""));
     setMenuOpen(false);
   };
 

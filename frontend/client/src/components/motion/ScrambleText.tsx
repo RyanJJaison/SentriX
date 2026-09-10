@@ -12,6 +12,20 @@ interface ScrambleTextProps {
 
 const GLYPHS = "01アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲンABCDEFXYZ0123456789_//--#%*+";
 
+// Suppress hover-triggered scrambles while the page is actively scrolling — the
+// pointer sweeping across headings mid-scroll would otherwise kick off bursts of
+// interval-driven re-renders and fight the scroll for the main thread.
+let lastScrollAt = 0;
+if (typeof window !== "undefined") {
+  window.addEventListener(
+    "scroll",
+    () => {
+      lastScrollAt = performance.now();
+    },
+    { passive: true }
+  );
+}
+
 export function ScrambleText({
   text,
   scrambleOnHover = true,
@@ -26,6 +40,8 @@ export function ScrambleText({
 
   const startScramble = () => {
     if (isScramblingRef.current) return;
+    // Ignore scrambles provoked by the pointer passing over text during a scroll.
+    if (performance.now() - lastScrollAt < 250) return;
     isScramblingRef.current = true;
 
     let iteration = 0;
