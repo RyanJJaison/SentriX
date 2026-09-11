@@ -2,9 +2,11 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routers import address, ai, alerts, audit, auth, graph, traffic
 from app.capture.manager import capture_manager
+from app.core.config import settings
 from app.core.security import decode_access_token
 from app.scheduler import rescoring
 from app.services import audit_service
@@ -33,6 +35,25 @@ app = FastAPI(
     "& Analysis of Bitcoin Transaction Traffic (Team ZENITH).",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+
+# Browser access for the dashboard. Registered before the audit middleware so
+# CORS headers are attached outermost and therefore survive on every response,
+# including the 401s the auth dependency raises.
+#
+# allow_methods/allow_headers are restricted rather than wildcarded: the API
+# only exposes GET and POST (10 and 3 routes respectively), and the browser
+# only ever needs to send Authorization (the JWT) plus Content-Type (the
+# form-encoded login body). allow_credentials stays off because the token
+# travels in a header, not a cookie -- and a wildcard origin with credentials
+# enabled is rejected by browsers anyway.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 

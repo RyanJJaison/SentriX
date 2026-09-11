@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
-from app.models.schemas import Alert, AddressRisk, GraphEdge, GraphNode, RankedAddress, RiskFactors, SubgraphResponse
+from app.models.schemas import Alert, AddressRisk, GraphEdge, GraphNode, OverviewStats, RankedAddress, RiskFactors, SubgraphResponse
 from app.services import traffic_correlation
 
 log = logging.getLogger(__name__)
@@ -281,11 +281,17 @@ def top_ranked_addresses(limit: int = 50) -> list[str]:
     return [risk.address for risk in _ranked_risks(threshold=0.0, limit=limit)]
 
 
+# Tier cutoffs, named so the overview card and the table agree by construction
+# rather than by two copies of the same literal.
+CRITICAL_THRESHOLD = 0.8
+REVIEW_THRESHOLD = 0.6
+
+
 def risk_tier(score: float) -> str:
     """Bucket a fused score into the dashboard's three display tiers."""
-    if score >= 0.8:
+    if score >= CRITICAL_THRESHOLD:
         return "Critical"
-    if score >= 0.6:
+    if score >= REVIEW_THRESHOLD:
         return "Review"
     return "Monitor"
 
@@ -336,6 +342,44 @@ def _edge_id(source: str, target: str) -> str:
     """
     low, high = sorted((source, target))
     return hashlib.sha1(f"{low}->{high}".encode()).hexdigest()[:16]
+
+
+# Held-out test metrics for the shipped GraphSAGE checkpoint, from
+# data/processed/ablation.md (enriched config, mean over seeds 42/1337/2024).
+# Hardcoded deliberately: these are properties of a trained model artefact, not
+# a runtime measurement, and they only change when the model is retrained. The
+# source file is the ablation table those numbers were verified against.
+MODEL_TEST_AUC = 0.9570
+MODEL_TEST_F1 = 0.6943
+
+
+def get_overview_stats() -> OverviewStats:
+    """Aggregate counters for the dashboard's summary cards.
+
+    `addresses_monitored` is the full exported dataset. `high_risk_count`,
+    however, is counted over the fused candidate pool rather than all ~204k
+    addresses: the fused score includes the live traffic term, so a true
+    dataset-wide count would mean fusing every address on every request. The
+    pool is the same one the alerts feed and ranked table draw from, and
+    `high_risk_scanned` reports how many addresses were actually examined so
+    the count can be presented honestly rather than implying a full scan.
+
+    `high_risk_count` is live: it moves as the rescoring loop refreshes traffic
+    components and addresses cross the tier threshold.
+    """
+    graph_scores = _load_graph_scores()
+    scanned = _candidate_addresses()
+    high_risk = sum(
+        1 for addr in scanned if get_address_risk(addr).risk_score >= CRITICAL_THRESHOLD
+    )
+    return OverviewStats(
+        addresses_monitored=len(graph_scores),
+        high_risk_count=high_risk,
+        high_risk_scanned=len(scanned),
+        critical_threshold=CRITICAL_THRESHOLD,
+        model_test_auc=MODEL_TEST_AUC,
+        model_test_f1=MODEL_TEST_F1,
+    )
 
 
 def get_subgraph(address: str, depth: int = 1) -> SubgraphResponse:

@@ -1,12 +1,20 @@
 from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import require_role
-from app.models.schemas import AddressRisk, RankedAddress, UserPublic
+from app.models.schemas import AddressRisk, OverviewStats, RankedAddress, UserPublic
 from app.services import risk_service
 
 router = APIRouter(prefix="/address", tags=["address"])
 
 _ROLES = require_role("admin", "investigator", "analyst")
+
+
+# Literal paths are registered before /{address_id}/risk so they are matched
+# first and never captured as an address id.
+@router.get("/stats", response_model=OverviewStats)
+def get_overview_stats(user: UserPublic = Depends(_ROLES)) -> OverviewStats:
+    """Aggregate counters for the dashboard's summary cards."""
+    return risk_service.get_overview_stats()
 
 
 # Registered before /{address_id}/risk so the literal path is matched first and

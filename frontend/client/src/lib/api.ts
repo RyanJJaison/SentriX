@@ -62,6 +62,16 @@ export interface RankedAddress {
   last_updated: string;
 }
 
+/** `OverviewStats` */
+export interface OverviewStats {
+  addresses_monitored: number;
+  high_risk_count: number;
+  high_risk_scanned: number;
+  critical_threshold: number;
+  model_test_auc: number;
+  model_test_f1: number;
+}
+
 // --------------------------------------------------------------------------- //
 // Errors
 // --------------------------------------------------------------------------- //
@@ -305,4 +315,10 @@ export function listRankedAddresses(threshold = 0, limit = 25): Promise<RankedAd
     limit: String(Math.min(Math.max(Math.trunc(limit), 1), 500)),
   });
   return authFetch<RankedAddress[]>(`/address/ranked?${params}`);
+}
+
+
+/** `GET /address/stats` -- aggregate counters for the overview cards. */
+export function getOverviewStats(): Promise<OverviewStats> {
+  return authFetch<OverviewStats>("/address/stats");
 }

@@ -16,6 +16,18 @@ class Settings(BaseSettings):
 
     audit_log_path: str = "audit.log"
 
+    # --- CORS ---
+    # Comma-separated browser origins allowed to call this API. The Vite dev
+    # server is the default; add the deployed dashboard origin in production.
+    # Credentials are not used (the JWT travels in an Authorization header), so
+    # this list only needs the origins that actually serve the frontend.
+    cors_allowed_origins: str = "http://localhost:3000"
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """`cors_allowed_origins` split into a list, blanks dropped."""
+        return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
+
     # --- Traffic Correlation Engine (Technical Architecture §3.5) ---
     # Capture. Live tshark is opt-in; with it disabled and no PCAP path the
     # engine seeds deterministic demo fixtures so /traffic/* works out of the box.
