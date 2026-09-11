@@ -26,6 +26,29 @@ class AddressRisk(BaseModel):
     last_updated: str
 
 
+class OverviewStats(BaseModel):
+    """Counters behind the dashboard's summary cards.
+
+    No trend or delta fields: nothing persists a previous cycle's values, so a
+    percentage change would have to be invented. The cards render the current
+    figure only.
+
+    There is deliberately no "transactions analysed" counter. In the Elliptic
+    dataset one node *is* one transaction, so it would be a duplicate of
+    `addresses_monitored` under a grander label.
+    """
+
+    addresses_monitored: int
+    high_risk_count: int
+    # How many addresses were fused to produce `high_risk_count`. The count is
+    # over the candidate pool, not the whole dataset, and the UI says so.
+    high_risk_scanned: int
+    critical_threshold: float
+    # Held-out test metrics for the shipped checkpoint, not runtime confidence.
+    model_test_auc: float
+    model_test_f1: float
+
+
 class RankedAddress(BaseModel):
     """One row of the dashboard's risk-ranked address table.
 

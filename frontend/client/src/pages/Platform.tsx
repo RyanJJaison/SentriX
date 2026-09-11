@@ -1,11 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import "../platform.css";
 import { HudFrame, ScrambleText, SoundToggle, playUiSound } from "@/components/motion";
-import { ApiError, NetworkError, UnauthorizedError, clearToken, getAddressRisk, listAlerts, listRankedAddresses, type AddressRisk, type Alert as ApiAlert, type RankedAddress } from "@/lib/api";
+import { ApiError, NetworkError, UnauthorizedError, clearToken, getAddressRisk, getOverviewStats, listAlerts, listRankedAddresses, type AddressRisk, type Alert as ApiAlert, type OverviewStats, type RankedAddress } from "@/lib/api";
 import {
   Activity,
   AlertTriangle,
-  ArrowDownRight,
   ArrowUpRight,
   Bot,
   Check,
@@ -113,8 +112,6 @@ type AddressRow = {
   status: "Critical" | "Review" | "Monitor";
 };
 
-
-
 const navItems = [
   { label: "Overview", icon: LayoutDashboard },
   { label: "Risk signals", icon: Activity, count: "12" },
@@ -157,25 +154,6 @@ function toFeedAlert(row: ApiAlert): Alert {
 function RiskScore({ value, size = "md" }: { value: number; size?: "sm" | "md" | "lg" }) {
   const color = value >= 0.8 ? "critical" : value >= 0.6 ? "review" : "monitor";
   return <span className={`risk-score ${color} ${size}`}>{value.toFixed(2)}</span>;
-}
-
-function MiniSparkline({ points, accent = "teal" }: { points: number[]; accent?: "teal" | "violet" | "red" }) {
-  const width = 96;
-  const height = 28;
-  const max = Math.max(...points);
-  const min = Math.min(...points);
-  const path = points
-    .map((point, index) => {
-      const x = (index / (points.length - 1)) * width;
-      const y = height - ((point - min) / (max - min || 1)) * 20 - 4;
-      return `${index === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`;
-    })
-    .join(" ");
-  return (
-    <svg className={`sparkline ${accent}`} viewBox={`0 0 ${width} ${height}`} aria-hidden="true">
-      <path d={path} fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-    </svg>
-  );
 }
 
 function NetworkMap() {
@@ -230,12 +208,20 @@ function GnnPipeline() {
   );
 }
 
-function MetricCard({ label, value, note, trend, icon: Icon, accent, points }: { label: string; value: string; note: string; trend: string; icon: typeof Activity; accent: string; points: number[] }) {
+/**
+ * One summary card.
+ *
+ * No `trend` or `points`: the previous version showed a percentage delta and a
+ * nine-point sparkline, both hardcoded. Nothing persists a previous rescoring
+ * cycle's values, so any delta or history line would be invented. They were
+ * removed rather than faked -- a real trend needs stored history first.
+ */
+function MetricCard({ label, value, note, icon: Icon, accent, loading }: { label: string; value: string; note: string; icon: typeof Activity; accent: string; loading?: boolean }) {
   return (
     <div className="metric-card">
       <div className="metric-top"><span className={`metric-icon ${accent}`}><Icon size={15} /></span><span className="metric-label">{label}</span><MoreHorizontal size={15} className="metric-more" /></div>
-      <div className="metric-value-row"><strong>{value}</strong><span className={`metric-trend ${trend.startsWith("+") ? "positive" : "negative"}`}>{trend.startsWith("+") ? <ArrowUpRight size={13} /> : <ArrowDownRight size={13} />}{trend}</span></div>
-      <div className="metric-bottom"><span>{note}</span><MiniSparkline points={points} accent={accent === "violet" ? "violet" : accent === "red" ? "red" : "teal"} /></div>
+      <div className="metric-value-row"><strong>{loading ? "…" : value}</strong></div>
+      <div className="metric-bottom"><span>{note}</span></div>
     </div>
   );
 }
@@ -244,6 +230,22 @@ export default function Home() {
   const [activeNav, setActiveNav] = useState("Overview");
   const [query, setQuery] = useState("");
   const [filterOpen, setFilterOpen] = useState(false);
+  // Real counters for the summary cards, from GET /address/stats.
+  const [stats, setStats] = useState<OverviewStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    getOverviewStats()
+      .then((row) => { if (!cancelled) { setStats(row); setStatsLoading(false); } })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setStatsLoading(false);
+        if (error instanceof UnauthorizedError) { clearToken(); window.location.href = "/login"; }
+      });
+    return () => { cancelled = true; };
+  }, []);
+
   // Live risk-ranked addresses from GET /address/ranked. Shares the backend's
   // candidate pool and fused scores with /alerts, so the table and the signal
   // feed cannot disagree about which addresses rank highest.
@@ -412,10 +414,22 @@ export default function Home() {
           <section className="hero-row"><div><div className="eyebrow"><span className="eyebrow-line" /> SYSTEM OVERVIEW</div><h1>Good evening, <em>User.</em></h1><p>Live intelligence across the Bitcoin network, tuned for signal over noise.</p></div><div className="hero-meta"><span><Clock3 size={14} /> Tuesday, 08 Sep 2026</span><span><Radio size={14} /> Block <b>#912,481</b></span></div></section>
 
           <section className="metric-grid" aria-label="Network metrics">
-            <MetricCard label="Addresses monitored" value="184,392" note="Across 12 active clusters" trend="+4.8%" icon={Globe2} accent="teal" points={[25, 30, 28, 36, 34, 42, 50, 46, 55]} />
-            <MetricCard label="High-risk signals" value="12" note="4 new in the last hour" trend="+3" icon={AlertTriangle} accent="red" points={[36, 30, 38, 32, 44, 43, 50, 46, 63]} />
-            <MetricCard label="Transactions analyzed" value="2.84M" note="Ledger + traffic signals" trend="+12.6%" icon={Layers} accent="violet" points={[22, 28, 26, 34, 32, 44, 42, 50, 59]} />
-            <MetricCard label="Model confidence" value="94.2%" note="GraphSAGE · v1.4.2" trend="−0.8%" icon={ShieldCheck} accent="teal" points={[58, 52, 54, 56, 52, 50, 48, 47, 45]} />
+            <MetricCard label="Addresses scored" value={stats ? stats.addresses_monitored.toLocaleString() : "—"} note="Elliptic transactions in the exported dataset" icon={Globe2} accent="teal" loading={statsLoading} />
+            {/* Counted over the fused candidate pool, not the whole dataset: the
+                fused score includes the live traffic term, so a dataset-wide
+                count would mean re-fusing ~204k addresses per request. The note
+                states the scanned denominator rather than implying a full scan. */}
+            <MetricCard label="High-risk signals" value={stats ? stats.high_risk_count.toLocaleString() : "—"} note={stats ? `Score ≥ ${stats.critical_threshold} · of ${stats.high_risk_scanned.toLocaleString()} ranked candidates` : "—"} icon={AlertTriangle} accent="red" loading={statsLoading} />
+            {/* Was "Transactions analyzed · 2.84M". In Elliptic one node *is* one
+                transaction, so there is no distinct count to show -- the old
+                figure was a larger-sounding label over the same quantity. The
+                card now reports the graph's edge structure instead, which is a
+                real and different property of the dataset. */}
+            <MetricCard label="Graph edges" value="234,355" note="Transaction links in the Elliptic edge list" icon={Layers} accent="violet" loading={false} />
+            {/* Held-out test AUC for the shipped checkpoint (enriched config,
+                mean over 3 seeds, data/processed/ablation.md) -- not a runtime
+                "confidence" statistic, which is what the old 94.2% implied. */}
+            <MetricCard label="Model test AUC" value={stats ? stats.model_test_auc.toFixed(3) : "—"} note={stats ? `GraphSAGE · held-out test · F1 ${stats.model_test_f1.toFixed(3)}` : "—"} icon={ShieldCheck} accent="teal" loading={statsLoading} />
           </section>
 
           <section className="section-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> INVESTIGATION SURFACE</div><h2>Signal desk</h2></div><div className="section-actions"><button className="secondary-button" onClick={() => setFilterOpen(!filterOpen)}><SlidersHorizontal size={14} /> Filters <ChevronDown size={13} /></button><button className="primary-button" onClick={() => { playUiSound("radar"); refresh(); }}><RefreshCw size={14} className={isRefreshing ? "spin" : ""} /> Rescore now</button></div></section>
