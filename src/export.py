@@ -158,8 +158,14 @@ def build_records(
                     }
                 ],
                 "graph_context": {
-                    "ppr_score": round(float(row.ppr_fwd_score), 6),
-                    "ppr_percentile": round(float(row.ppr_fwd_percentile), 6),
+                    # All four PPR columns are exposed rather than the forward
+                    # pair alone: forward and reverse answer different questions
+                    # (downstream of illicit versus paying toward illicit) and a
+                    # consumer cannot reconstruct one from the other.
+                    "ppr_fwd_score": round(float(row.ppr_fwd_score), 6),
+                    "ppr_fwd_percentile": round(float(row.ppr_fwd_percentile), 6),
+                    "ppr_rev_score": round(float(row.ppr_rev_score), 6),
+                    "ppr_rev_percentile": round(float(row.ppr_rev_percentile), 6),
                     "neighbor_count": int(degree[node_index]),
                     "known_illicit_neighbors": int(illicit_neighbors[node_index]),
                 },
