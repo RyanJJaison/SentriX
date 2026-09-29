@@ -5,3 +5,9 @@ venv/
 .env
 audit.log
 .pytest_cache/
+
+# Runtime logs written by the dev servers (uvicorn, the P2P feed). These are
+# local process output, not source; p2p_feed.log alone reaches hundreds of KB
+# in a single session.
+backend.log
+p2p_feed.log
